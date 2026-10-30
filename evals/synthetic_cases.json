@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "description": "Offline synthetic cases for orchestration, multi-turn, recovery, routing and API validation. They do not measure factual answer quality.",
+  "research_cases": [
+    {
+      "id": "agent_platform_zh",
+      "goal": "调研 2026 年企业级大模型 Agent 平台，比较主要厂商、编排架构、工具治理与落地风险。",
+      "follow_up": "只保留支持私有化部署的产品，并补充定价模式和迁移成本。",
+      "model": "large-test-model",
+      "tags": ["industry", "chinese", "constraints"]
+    },
+    {
+      "id": "database_selection",
+      "goal": "对比 PostgreSQL、MySQL 与分布式 SQL 数据库在金融核心系统中的适用性。",
+      "follow_up": "加入数据主权、同城双活和五年总体拥有成本约束后重新给出建议。",
+      "model": "small-test-model",
+      "tags": ["technology", "comparison", "follow-up-constraints"]
+    },
+    {
+      "id": "ev_market",
+      "goal": "分析中国新能源汽车市场的竞争格局、供应链变化和未来三年主要风险。",
+      "follow_up": "聚焦商用车市场，并区分政策驱动因素和市场驱动因素。",
+      "model": "large-test-model",
+      "tags": ["market", "scope-change"]
+    },
+    {
+      "id": "ai_security",
+      "goal": "研究生成式 AI 应用的提示词注入、数据泄露与工具滥用风险及防护方案。",
+      "follow_up": "仅采用标准组织和云厂商官方资料，生成一份上线检查清单。",
+      "model": "large-test-model",
+      "tags": ["security", "source-policy", "deliverable-change"]
+    },
+    {
+      "id": "chip_supply_chain",
+      "goal": "研究先进制程 AI 芯片供应链的关键环节、集中度与潜在中断因素。",
+      "follow_up": "增加一个关键代工产能下降 30% 的情景分析，并列出可观测预警信号。",
+      "model": "small-test-model",
+      "tags": ["supply-chain", "scenario"]
+    },
+    {
+      "id": "medical_ai",
+      "goal": "评估医疗影像 AI 产品从研发到医院部署涉及的验证、合规和运维要求。",
+      "follow_up": "将目标市场限定为中国三级医院，并按试点、采购、上线三个阶段组织答案。",
+      "model": "large-test-model",
+      "tags": ["healthcare", "compliance", "structure"]
+    },
+    {
+      "id": "energy_storage",
+      "goal": "比较锂离子、钠离子和液流电池在电网侧长时储能中的技术经济性。",
+      "follow_up": "假设项目位于高温地区且每天两充两放，重新分析寿命和安全性。",
+      "model": "small-test-model",
+      "tags": ["energy", "technical", "assumption-change"]
+    },
+    {
+      "id": "bilingual_request",
+      "goal": "Research open-source agent frameworks and explain their orchestration, observability, and enterprise support in Chinese.",
+      "follow_up": "Now provide a concise English decision matrix for a team already using Kubernetes.",
+      "model": "large-test-model",
+      "tags": ["english", "language-switch", "format-change"]
+    }
+  ],
+  "validation_cases": [
+    {
+      "id": "missing_goal",
+      "payload": {},
+      "expected_status": 422
+    },
+    {
+      "id": "resume_without_thread",
+      "payload": {"resume": true},
+      "expected_status": 422
+    },
+    {
+      "id": "same_parent_and_thread",
+      "payload": {
+        "user_goal": "invalid",
+        "thread_id": "same-thread",
+        "parent_thread_id": "same-thread"
+      },
+      "expected_status": 422
+    },
+    {
+      "id": "unknown_pause_node",
+      "payload": {
+        "user_goal": "invalid",
+        "pause_after": ["unknown-node"]
+      },
+      "expected_status": 422
+    },
+    {
+      "id": "missing_parent",
+      "payload": {
+        "user_goal": "follow up",
+        "thread_id": "orphan-turn",
+        "parent_thread_id": "does-not-exist"
+      },
+      "expected_status": 404
+    }
+  ]
+}

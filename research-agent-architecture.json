@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Research Agent 多智能体调研平台架构",
+    "locale": "zh-CN",
+    "output": "research-agent-architecture.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "research-request",
+        "label": "调研请求主链",
+        "focus": ["browser-workbench", "agent-orchestrator", "agent-team", "guarded-tools", "external-sources"],
+        "note": "从浏览器提交请求，经 API、LangGraph 编排和并行 Agent 到达真实外部证据源。"
+      },
+      {
+        "id": "evidence-path",
+        "label": "证据与 RAG",
+        "focus": ["agent-team", "guarded-tools", "rag-pipeline", "state-store", "external-sources"],
+        "note": "工具治理、知识库检索和持久化共同形成可核验的证据链。"
+      },
+      {
+        "id": "reliability-path",
+        "label": "恢复与可观测性",
+        "focus": ["agent-orchestrator", "state-store", "observability"],
+        "note": "Checkpoint、Blackboard、SAGA 与 Trace 支撑暂停、续跑和故障恢复。"
+      }
+    ]
+  },
+  "layout": {
+    "mode": "grid",
+    "origin": [70, 130],
+    "cols": 5,
+    "gapX": 108,
+    "gapY": 180,
+    "cellW": 170,
+    "cellH": 84
+  },
+  "components": [
+    {
+      "id": "browser-workbench",
+      "type": "frontend",
+      "label": "Web 调研工作台",
+      "sublabel": "调研 · 审批 · 报告",
+      "tag": "HTML / CSS / JavaScript",
+      "row": 1,
+      "col": 0,
+      "size": [170, 84]
+    },
+    {
+      "id": "agent-orchestrator",
+      "type": "backend",
+      "label": "FastAPI + LangGraph",
+      "sublabel": "AgentRuntime · 动态 DAG",
+      "tag": "API 与控制平面",
+      "row": 1,
+      "col": 1,
+      "size": [170, 84]
+    },
+    {
+      "id": "agent-team",
+      "type": "backend",
+      "label": "多智能体执行层",
+      "sublabel": "规划 · 研究 · 验证 · 写作",
+      "tag": "结构化输出",
+      "row": 1,
+      "col": 2,
+      "size": [170, 84]
+    },
+    {
+      "id": "guarded-tools",
+      "type": "security",
+      "label": "工具注册与 Guardrail",
+      "sublabel": "Schema · 权限 · 配额 · SQL",
+      "tag": "受治理执行边界",
+      "row": 1,
+      "col": 3,
+      "size": [170, 84]
+    },
+    {
+      "id": "external-sources",
+      "type": "external",
+      "label": "外部证据与数据源",
+      "sublabel": "Tavily · MCP · SQL",
+      "tag": "真实来源",
+      "row": 1,
+      "col": 4,
+      "size": [170, 84]
+    },
+    {
+      "id": "model-services",
+      "type": "external",
+      "label": "OpenAI 兼容模型服务",
+      "sublabel": "小模型路由 · 大模型推理",
+      "tag": "Structured Output",
+      "row": 0,
+      "col": 2,
+      "size": [170, 84]
+    },
+    {
+      "id": "observability",
+      "type": "cloud",
+      "label": "可观测性",
+      "sublabel": "本地 Trace · 可选 LangSmith",
+      "tag": "Span / Token / Error",
+      "row": 0,
+      "col": 1,
+      "size": [170, 84]
+    },
+    {
+      "id": "state-store",
+      "type": "database",
+      "label": "状态、证据与记忆",
+      "sublabel": "检查点 · 黑板 · 证据 · 记忆",
+      "tag": "内存 / PostgreSQL + pgvector",
+      "row": 2,
+      "col": 1,
+      "size": [170, 84]
+    },
+    {
+      "id": "rag-pipeline",
+      "type": "backend",
+      "label": "多阶段 RAG",
+      "sublabel": "改写 · 召回 · 重排 · Top-K",
+      "tag": "知识库检索",
+      "row": 2,
+      "col": 3,
+      "size": [170, 84]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Research Agent API 进程",
+      "wraps": ["agent-orchestrator", "agent-team", "guarded-tools", "rag-pipeline"],
+      "pad": 34
+    }
+  ],
+  "connections": [
+    {"id": "browser-to-runtime", "from": "browser-workbench", "to": "agent-orchestrator", "label": "HTTP /research", "variant": "emphasis"},
+    {"id": "runtime-to-agents", "from": "agent-orchestrator", "to": "agent-team", "label": "Send 并行", "variant": "emphasis"},
+    {"id": "agents-to-tools", "from": "agent-team", "to": "guarded-tools", "label": "受治理工具调用", "variant": "security"},
+    {"id": "tools-to-sources", "from": "guarded-tools", "to": "external-sources", "label": "检索 / MCP / SQL"},
+    {"id": "agents-to-models", "from": "agent-team", "to": "model-services", "label": "OpenAI 兼容 API"},
+    {"id": "runtime-to-observability", "from": "agent-orchestrator", "to": "observability", "label": "Trace / Token", "variant": "dashed", "labelAt": [433, 300]},
+    {"id": "runtime-to-state", "from": "agent-orchestrator", "to": "state-store", "label": "Checkpoint / Blackboard", "labelAt": [433, 492]},
+    {"id": "tools-to-rag", "from": "guarded-tools", "to": "rag-pipeline", "label": "knowledge_base.search", "labelAt": [989, 492]},
+    {"id": "rag-to-state", "from": "rag-pipeline", "to": "state-store", "label": "pgvector / FTS"}
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "控制平面",
+      "items": ["动态 Planner 生成任务 DAG", "Supervisor 用 LangGraph Send 并行分派可运行任务"]
+    },
+    {
+      "dot": "rose",
+      "title": "证据治理",
+      "items": ["工具调用先经过 Schema、权限、配额和风险检查", "报告来源由 Evidence Store 保留可核验引用"]
+    },
+    {
+      "dot": "emerald",
+      "title": "可靠性与恢复",
+      "items": ["Checkpoint 与 Blackboard 支持暂停、续跑和进程恢复", "Recovery、SAGA 和人工审批处理失败与高风险操作"]
+    }
+  ]
+}

@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="多智能体深度调研工作台" />
+    <title>DeepResearch · 多智能体调研工作台</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="DeepResearch 首页">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>
+            <strong>DeepResearch</strong>
+            <small>Agent Intelligence Studio</small>
+          </span>
+        </a>
+        <div class="topbar-actions">
+          <span id="serviceStatus" class="service-status"><i></i> 正在连接</span>
+          <a class="button button-ghost desktop-only" href="/docs" target="_blank" rel="noreferrer">API 文档</a>
+          <button id="openSettings" class="button button-dark" type="button">配置 API</button>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <aside class="sidebar">
+          <button id="newResearch" class="new-research" type="button">
+            <span aria-hidden="true">＋</span> 新建调研
+          </button>
+          <div class="sidebar-section">
+            <div class="section-label"><span>最近任务</span><button id="clearHistory" type="button">清空</button></div>
+            <div id="historyList" class="history-list">
+              <p class="empty-sidebar">暂无历史任务</p>
+            </div>
+          </div>
+          <div class="sidebar-footer">
+            <div class="mini-orbit" aria-hidden="true"><span></span></div>
+            <div><strong>本地优先</strong><small>密钥不会在页面中回显</small></div>
+          </div>
+        </aside>
+
+        <main class="main-content">
+          <section id="composerView" class="composer-view">
+            <div class="intro">
+              <span class="eyebrow">MULTI-AGENT RESEARCH</span>
+              <h1>把复杂问题，交给一支<br /><em>会协作的研究团队</em></h1>
+              <p>自动拆解任务、并行检索、交叉验证证据，并生成结构化研究报告。</p>
+            </div>
+
+            <form id="researchForm" class="research-composer">
+              <label for="goalInput">你想研究什么？</label>
+              <textarea id="goalInput" name="goal" rows="5" maxlength="10000" placeholder="例如：调研当前大模型 Agent 平台的发展趋势，包括主要厂商、技术架构、优缺点和未来方向" required></textarea>
+              <div class="prompt-suggestions" aria-label="调研示例">
+                <button type="button" data-prompt="调研当前大模型 Agent 平台的发展趋势，包括主要厂商、技术架构、优缺点和未来方向">Agent 平台趋势</button>
+                <button type="button" data-prompt="分析中国新能源汽车市场的竞争格局、主要企业、关键技术和未来三年趋势">新能源汽车市场</button>
+                <button type="button" data-prompt="对比 PostgreSQL、MySQL 和分布式 SQL 数据库在企业核心系统中的适用场景">数据库技术选型</button>
+              </div>
+              <div class="composer-footer">
+                <div class="identity-field">
+                  <label for="userIdInput">研究者 ID</label>
+                  <input id="userIdInput" value="local-user" maxlength="200" />
+                </div>
+                <div class="model-field">
+                  <label for="modelSelect">本轮模型</label>
+                  <select id="modelSelect"><option value="">自动路由（推荐）</option></select>
+                </div>
+                <button id="startResearch" class="button button-primary" type="submit">
+                  <span>开始深度调研</span><b aria-hidden="true">→</b>
+                </button>
+              </div>
+            </form>
+
+            <div class="capability-grid">
+              <article><span>01</span><h3>动态任务 DAG</h3><p>Planner 自动拆解目标，Supervisor 根据依赖并行调度。</p></article>
+              <article><span>02</span><h3>证据交叉验证</h3><p>Verifier 对结论做多来源检查，保留冲突和不确定性。</p></article>
+              <article><span>03</span><h3>可恢复长流程</h3><p>Checkpoint、重试和人工介入，让复杂调研不中断。</p></article>
+            </div>
+          </section>
+
+          <section id="runView" class="run-view" hidden>
+            <div class="run-heading">
+              <div>
+                <button id="backToComposer" class="back-link" type="button">← 返回新建调研</button>
+                <span id="runStatusBadge" class="status-badge status-planning">准备中</span>
+                <h2 id="runGoal">调研任务</h2>
+                <button id="copyThread" class="thread-id" type="button" title="复制任务 ID">任务 ID：<code id="threadId"></code></button>
+              </div>
+              <div class="run-actions">
+                <button id="refreshRun" class="button button-ghost" type="button">刷新</button>
+                <button id="pauseExecution" class="button button-ghost" type="button" hidden>暂停执行</button>
+                <button id="resumeExecution" class="button button-primary" type="button" hidden>继续执行</button>
+                <button id="downloadReport" class="button button-dark" type="button" disabled>下载报告</button>
+              </div>
+            </div>
+
+            <section class="panel conversation-panel">
+              <div class="panel-heading">
+                <div><span class="eyebrow">CONVERSATION</span><h3>研究对话</h3></div>
+                <span id="turnCounter" class="active-agent">第 1 轮</span>
+              </div>
+              <div id="conversationMessages" class="conversation-messages"></div>
+            </section>
+
+            <div class="progress-card">
+              <div class="progress-summary">
+                <div><strong id="progressPercent">0%</strong><span>整体进度</span></div>
+                <p id="progressText">正在解析研究目标…</p>
+                <span id="taskCounter">0 / 0 节点</span>
+              </div>
+              <div class="progress-track"><span id="progressBar"></span></div>
+            </div>
+
+            <div class="run-grid">
+              <section class="panel task-panel">
+                <div class="panel-heading"><div><span class="eyebrow">EXECUTION GRAPH</span><h3>Agent 执行节点</h3></div><span id="activeAgent" class="active-agent">等待调度</span></div>
+                <div id="taskList" class="task-list"><div class="task-skeleton"></div><div class="task-skeleton"></div><div class="task-skeleton"></div></div>
+              </section>
+
+              <section class="panel insight-panel">
+                <div class="panel-heading"><div><span class="eyebrow">LIVE SIGNALS</span><h3>执行摘要</h3></div></div>
+                <div class="signal-list">
+                  <div><span class="signal-icon">D</span><p><strong id="completedCount">0</strong><small>已完成节点</small></p></div>
+                  <div><span class="signal-icon">E</span><p><strong id="evidenceCount">0</strong><small>证据引用</small></p></div>
+                  <div><span class="signal-icon">X</span><p><strong id="errorCount">0</strong><small>异常记录</small></p></div>
+                </div>
+                <div id="errorBox" class="error-box" hidden></div>
+              </section>
+            </div>
+
+            <section class="panel reasoning-panel">
+              <div class="panel-heading">
+                <div><span class="eyebrow">SAFE REASONING TRACE</span><h3>模型思考与执行过程</h3></div>
+                <span class="trace-note">展示规划与调用摘要，不展示私有思维链</span>
+              </div>
+              <div id="reasoningTimeline" class="reasoning-timeline"><p class="empty-provenance">正在等待 Planner 生成第一步计划…</p></div>
+            </section>
+
+            <section class="panel provenance-panel">
+              <div class="panel-heading">
+                <div><span class="eyebrow">LIVE TOOL PROVENANCE</span><h3>真实工具调用与来源</h3></div>
+                <span class="live-source-badge"><i></i> 非模拟数据</span>
+              </div>
+              <div class="provenance-grid">
+                <div><h4>工具执行记录</h4><div id="toolCallList" class="tool-call-list"><p class="empty-provenance">等待 Researcher 自主调用检索工具…</p></div></div>
+                <div><h4>外部证据来源</h4><div id="evidenceList" class="evidence-list"><p class="empty-provenance">成功检索后将在这里显示真实来源 URL。</p></div></div>
+              </div>
+            </section>
+
+            <section id="humanPanel" class="panel human-panel" hidden>
+              <div class="human-heading"><div class="human-symbol">!</div><div><span class="eyebrow">HUMAN IN THE LOOP</span><h3 id="feedbackTitle">需要你的确认</h3><p id="feedbackDescription">系统已安全暂停。批准操作或修改研究要求后继续。</p></div></div>
+              <div id="humanRequests" class="human-requests"></div>
+              <form id="feedbackForm" class="feedback-form">
+                <label>修改研究目标（可选）<textarea id="revisedGoal" rows="2" placeholder="保持为空则沿用原目标"></textarea></label>
+                <div class="feedback-row">
+                  <label>增加约束<input id="additionalConstraints" placeholder="多个约束用逗号分隔" /></label>
+                  <label>受影响节点（可选）<input id="affectedTasks" placeholder="留空由 Planner 自动判断" /></label>
+                </div>
+                <p class="feedback-hint">系统只会重新规划受影响节点及其下游任务，已完成且未受影响的结果会继续复用。</p>
+                <button id="feedbackSubmit" class="button button-primary" type="submit">应用新要求并继续 →</button>
+              </form>
+            </section>
+
+            <section id="reportPanel" class="panel report-panel" hidden>
+              <div class="panel-heading"><div><span class="eyebrow">FINAL DELIVERABLE</span><h3>研究报告</h3></div><button id="copyReport" class="button button-ghost" type="button">复制全文</button></div>
+              <article id="reportContent" class="report-content"></article>
+            </section>
+
+            <section id="followupPanel" class="panel followup-panel" hidden>
+              <div><span class="eyebrow">CONTINUE THE CONVERSATION</span><h3>基于以上结果继续追问</h3><p>新一轮会继承上一轮报告作为上下文，同时保留独立的任务与执行轨迹。</p></div>
+              <form id="followupForm" class="followup-form">
+                <textarea id="followupInput" rows="3" maxlength="10000" placeholder="例如：只保留企业级产品，并补充价格与部署方式对比" required></textarea>
+                <div class="followup-actions">
+                  <label>本轮模型<select id="followupModel"><option value="">自动路由（推荐）</option></select></label>
+                  <button id="sendFollowup" class="button button-primary" type="submit">发送并继续研究 →</button>
+                </div>
+              </form>
+            </section>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <dialog id="settingsDialog" class="settings-dialog">
+      <form id="settingsForm" method="dialog">
+        <div class="dialog-heading">
+          <div><span class="eyebrow">RUNTIME CONFIGURATION</span><h2>配置模型与工具 API</h2><p>配置仅保存在当前服务进程，刷新页面不会显示任何密钥。</p></div>
+          <button id="closeSettings" class="icon-button" type="button" aria-label="关闭">×</button>
+        </div>
+
+        <div class="config-status" id="configStatus"><i></i><span>正在读取配置…</span></div>
+        <div class="settings-section">
+          <div class="settings-section-title"><span>01</span><div><h3>OpenAI 兼容模型</h3><p>支持 OpenAI API、DeepSeek、通义千问及本地兼容服务。</p></div></div>
+          <div class="form-grid">
+            <label class="full">API Base URL<input id="openaiBaseUrl" type="url" placeholder="https://api.openai.com/v1" required /></label>
+            <label class="full">API Key<div class="secret-field"><input id="openaiApiKey" type="password" autocomplete="new-password" placeholder="留空表示保留现有密钥" /><button type="button" data-toggle-secret="openaiApiKey">显示</button></div></label>
+            <label>轻量模型<input id="smallModel" placeholder="例如 gpt-4.1-mini" required /></label>
+            <label>高能力模型<input id="largeModel" placeholder="例如 gpt-4.1" required /></label>
+            <label class="full">结构化输出方式<select id="structuredOutput"><option value="json_schema">JSON Schema（推荐）</option><option value="function_calling">Function Calling</option><option value="json_mode">JSON Mode</option></select></label>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title"><span>02</span><div><h3>搜索与调试</h3><p>联网调研必须配置 Tavily；LangSmith 为可选能力。</p></div></div>
+          <div class="form-grid">
+            <label class="full">Tavily API Key（实时调研必填）<div class="secret-field"><input id="tavilyApiKey" type="password" autocomplete="new-password" placeholder="输入 Tavily API Key" /><button type="button" data-toggle-secret="tavilyApiKey">显示</button></div></label>
+            <label class="toggle-row"><span><strong>启用外部工具</strong><small>允许 Agent 使用 Tavily；内部数据库默认关闭且不阻塞任务</small></span><input id="toolsEnabled" type="checkbox" /></label>
+            <label class="toggle-row"><span><strong>任务质量门禁</strong><small>每个研究任务执行 Planner 查询，并由 Verifier 评分和触发补搜</small></span><input id="qualityGateEnabled" type="checkbox" /></label>
+            <label>初始 Tavily 搜索次数<input id="initialSearches" type="number" min="1" max="10" value="5" /></label>
+            <label>单任务最大搜索次数<input id="maxSearchesPerTask" type="number" min="1" max="100" value="10" /></label>
+            <label>任务完成分数<input id="completionScore" type="number" min="0" max="100" value="80" /></label>
+            <label>最少独立来源<input id="minUniqueSources" type="number" min="1" max="100" value="5" /></label>
+            <label>最少独立域名<input id="minIndependentDomains" type="number" min="1" max="50" value="3" /></label>
+            <label>每轮补搜数量<input id="followupBatchSize" type="number" min="1" max="5" value="2" /></label>
+            <label class="toggle-row"><span><strong>动态模型路由</strong><small>简单任务使用轻量模型</small></span><input id="dynamicRouting" type="checkbox" /></label>
+            <label class="toggle-row"><span><strong>LangSmith Trace</strong><small>上传执行链路用于调试</small></span><input id="langsmithTracing" type="checkbox" /></label>
+            <label class="full">LangSmith API Key<div class="secret-field"><input id="langsmithApiKey" type="password" autocomplete="new-password" placeholder="仅启用 Trace 时需要" /><button type="button" data-toggle-secret="langsmithApiKey">显示</button></div></label>
+            <label class="full">LangSmith Project<input id="langsmithProject" placeholder="research-agent-local" /></label>
+          </div>
+        </div>
+
+        <div class="security-note"><strong>安全提示</strong><p>适合本机或可信内网使用。不要把这个服务直接暴露到公网；生产环境应改用服务端密钥管理和用户鉴权。</p></div>
+        <div class="dialog-actions"><button id="cancelSettings" class="button button-ghost" type="button">取消</button><button id="saveSettings" class="button button-primary" type="submit">保存配置</button></div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>

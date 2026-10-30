@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "command": "visual-check",
+  "evidenceKind": "automated-browser",
+  "status": "fail",
+  "visualReview": "pending",
+  "artifact": {
+    "path": "D:\\pycharm_project\\deepresearch\\research_agent\\research-agent-architecture.html",
+    "sha256": "6eb490e26df95ec45ba48bde054bc1d7c5d00e193e1a1cdfa2223b5b2573ba01",
+    "bytes": 717624
+  },
+  "state": {
+    "detail": "read",
+    "motion": "still"
+  },
+  "chrome": {
+    "status": "available",
+    "executable": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  },
+  "diagnostics": [
+    {
+      "code": "viewer/visual-check-runtime",
+      "severity": "error",
+      "message": "visual-check could not complete its Chrome inspection.",
+      "subject": {
+        "artifact": "D:\\pycharm_project\\deepresearch\\research_agent\\research-agent-architecture.html"
+      },
+      "evidence": {
+        "reason": "Page.enable: timed out after 15000ms"
+      },
+      "supportedFixes": [
+        "resolve the reported Chrome inspection error, then rerun visual-check"
+      ]
+    }
+  ],
+  "containment": {
+    "status": "fail",
+    "viewports": []
+  },
+  "readability": {
+    "status": "fail",
+    "minimumProjectedNodeTextPx": 6,
+    "viewports": []
+  },
+  "viewerChrome": {
+    "status": "fail",
+    "viewports": []
+  },
+  "captures": {
+    "status": "fail",
+    "screenshots": [],
+    "contactSheet": null
+  },
+  "sidecars": {
+    "receipt": "research-agent-architecture.visual-check.json",
+    "contactSheet": "research-agent-architecture.visual-check.html"
+  },
+  "error": "Page.enable: timed out after 15000ms"
+}
