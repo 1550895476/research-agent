@@ -7,7 +7,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
 
 from agents.model import StructuredModel
-from agents.researcher import _render_context
+from agents.researcher import _render_context, _task_snapshot
+from core.context_compression import ContextCompressor
 from graph.state import ResearchRequirement, ResearchTask
 
 
@@ -37,9 +38,18 @@ class ReportDraft(BaseModel):
 class ReportWriterAgent:
     """Synthesize verified context without silently upgrading uncertain claims."""
 
-    def __init__(self, model: StructuredModel, *, max_context_chars: int = 16000) -> None:
+    def __init__(
+        self,
+        model: StructuredModel,
+        *,
+        max_context_chars: int = 16000,
+        context_compressor: ContextCompressor | None = None,
+    ) -> None:
         self._model = model
         self._max_context_chars = max_context_chars
+        self._context_compressor = context_compressor or ContextCompressor(
+            max_chars=max_context_chars
+        )
 
     def write(
         self,
@@ -47,10 +57,18 @@ class ReportWriterAgent:
         requirement: ResearchRequirement | None,
         task: ResearchTask,
         dependency_payloads: Sequence[Any],
+        *,
+        context_id: str | None = None,
     ) -> ReportDraft:
         """Generate a structured report and Markdown final answer."""
 
-        context = _render_context(dependency_payloads, self._max_context_chars)
+        context = _render_context(
+            dependency_payloads,
+            self._max_context_chars,
+            compressor=self._context_compressor,
+            context_id=context_id or f"task:{task.task_id}:writer",
+            snapshot=_task_snapshot(user_goal, task),
+        )
         requirement_text = requirement.model_dump_json(indent=2) if requirement else user_goal
         messages = [
             SystemMessage(

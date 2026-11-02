@@ -102,6 +102,11 @@ function fillConfigForm(config) {
   $("#smallModel").value = config.small_model || "";
   $("#largeModel").value = config.large_model || "";
   $("#structuredOutput").value = config.structured_output_method || "json_schema";
+  $("#maxAgentContextChars").value = config.max_agent_context_chars || 16000;
+  $("#softWatermark").value = config.context_soft_watermark ?? 0.70;
+  $("#hardWatermark").value = config.context_hard_watermark ?? 0.85;
+  $("#toolResultMaxChars").value = config.context_tool_result_max_chars || 2400;
+  $("#summaryMaxChars").value = config.context_summary_max_chars || 1200;
   $("#toolsEnabled").checked = config.tools_enabled;
   $("#qualityGateEnabled").checked = config.research_quality_gate_enabled;
   $("#initialSearches").value = config.research_initial_searches || 5;
@@ -113,6 +118,28 @@ function fillConfigForm(config) {
   $("#dynamicRouting").checked = config.dynamic_model_routing;
   $("#langsmithTracing").checked = config.langsmith_tracing;
   $("#langsmithProject").value = config.langsmith_project || "research-agent-local";
+  $("#maxConcurrentWorkers").value = config.max_concurrent_workers ?? 5;
+  $("#maxTotalTasks").value = config.max_total_tasks ?? 12;
+  $("#maxTotalSearches").value = config.max_total_searches ?? 100;
+  $("#maxTotalInputTokens").value = config.max_total_input_tokens ?? 500000;
+  $("#maxTotalOutputTokens").value = config.max_total_output_tokens ?? 200000;
+  $("#maxTotalCostUsd").value = config.max_total_cost_usd ?? 0;
+  $("#maxRunSeconds").value = config.max_run_seconds ?? 1200;
+  $("#maxConflictTasks").value = config.max_conflict_tasks ?? 2;
+  $("#taskMaxSearches").value = config.task_max_searches ?? 10;
+  $("#taskMaxSources").value = config.task_max_sources ?? 12;
+  $("#taskMaxInputTokens").value = config.task_max_input_tokens ?? 60000;
+  $("#taskMaxOutputTokens").value = config.task_max_output_tokens ?? 20000;
+  $("#taskMaxSeconds").value = config.task_max_seconds ?? 300;
+  $("#taskMaxRetries").value = config.task_max_retries ?? 2;
+  $("#smallInputPrice").value = config.small_input_cost_per_million ?? 0;
+  $("#smallOutputPrice").value = config.small_output_cost_per_million ?? 0;
+  $("#largeInputPrice").value = config.large_input_cost_per_million ?? 0;
+  $("#largeOutputPrice").value = config.large_output_cost_per_million ?? 0;
+  $("#planApprovalMode").value = config.plan_approval_mode || "auto";
+  $("#approvalTaskThreshold").value = config.plan_approval_task_threshold ?? 8;
+  $("#approvalTokenThreshold").value = config.plan_approval_token_threshold ?? 200000;
+  $("#approvalCostThreshold").value = config.plan_approval_cost_threshold_usd ?? 5;
   $("#openaiApiKey").placeholder = config.openai_configured ? "已配置；留空表示保留" : "输入 API Key";
   $("#tavilyApiKey").placeholder = config.tavily_configured ? "已配置；留空表示保留" : "实时调研必须配置";
   $("#langsmithApiKey").placeholder = config.langsmith_configured ? "已配置；留空表示保留" : "仅启用 Trace 时需要";
@@ -165,6 +192,11 @@ async function saveConfig(event) {
     small_model: $("#smallModel").value.trim(),
     large_model: $("#largeModel").value.trim(),
     structured_output_method: $("#structuredOutput").value,
+    max_agent_context_chars: Number($("#maxAgentContextChars").value),
+    context_soft_watermark: Number($("#softWatermark").value),
+    context_hard_watermark: Number($("#hardWatermark").value),
+    context_tool_result_max_chars: Number($("#toolResultMaxChars").value),
+    context_summary_max_chars: Number($("#summaryMaxChars").value),
     tools_enabled: $("#toolsEnabled").checked,
     research_quality_gate_enabled: $("#qualityGateEnabled").checked,
     research_initial_searches: Number($("#initialSearches").value),
@@ -174,6 +206,28 @@ async function saveConfig(event) {
     research_min_independent_domains: Number($("#minIndependentDomains").value),
     research_followup_batch_size: Number($("#followupBatchSize").value),
     dynamic_model_routing: $("#dynamicRouting").checked,
+    max_concurrent_workers: Number($("#maxConcurrentWorkers").value),
+    max_total_tasks: Number($("#maxTotalTasks").value),
+    max_total_searches: Number($("#maxTotalSearches").value),
+    max_total_input_tokens: Number($("#maxTotalInputTokens").value),
+    max_total_output_tokens: Number($("#maxTotalOutputTokens").value),
+    max_total_cost_usd: Number($("#maxTotalCostUsd").value),
+    max_run_seconds: Number($("#maxRunSeconds").value),
+    max_conflict_tasks: Number($("#maxConflictTasks").value),
+    task_max_searches: Number($("#taskMaxSearches").value),
+    task_max_sources: Number($("#taskMaxSources").value),
+    task_max_input_tokens: Number($("#taskMaxInputTokens").value),
+    task_max_output_tokens: Number($("#taskMaxOutputTokens").value),
+    task_max_seconds: Number($("#taskMaxSeconds").value),
+    task_max_retries: Number($("#taskMaxRetries").value),
+    small_input_cost_per_million: Number($("#smallInputPrice").value),
+    small_output_cost_per_million: Number($("#smallOutputPrice").value),
+    large_input_cost_per_million: Number($("#largeInputPrice").value),
+    large_output_cost_per_million: Number($("#largeOutputPrice").value),
+    plan_approval_mode: $("#planApprovalMode").value,
+    plan_approval_task_threshold: Number($("#approvalTaskThreshold").value),
+    plan_approval_token_threshold: Number($("#approvalTokenThreshold").value),
+    plan_approval_cost_threshold_usd: Number($("#approvalCostThreshold").value),
     langsmith_tracing: $("#langsmithTracing").checked,
     langsmith_project: $("#langsmithProject").value.trim() || "research-agent-local",
   };
@@ -405,6 +459,8 @@ function renderRun(run) {
   upsertTurnFromRun(run);
   renderConversation();
   renderReasoning(run.reasoning_steps || [], run);
+  renderContextCompressions(run.context_compressions || []);
+  renderBudget(run);
   renderErrors(run.errors || []);
   renderProvenance(run.tool_calls || [], run.evidences || []);
   renderHumanPanel(run);
@@ -421,6 +477,36 @@ function renderRun(run) {
     updatedAt: Date.now(),
   });
   if (["completed", "failed", "waiting_human"].includes(status) || (run.paused && state.pauseRequested)) stopPolling();
+}
+
+function renderBudget(run) {
+  const budget = run.budget || {};
+  const limits = budget.limits || {};
+  const lead = run.lead_decision || {};
+  const estimate = run.plan_estimate;
+  const metrics = run.metrics || {};
+  $("#leadMode").textContent = lead.mode
+    ? `${lead.mode === "multi" ? "Multi-Agent" : "Single-Agent"} · ${lead.recommended_workers || 1} Worker`
+    : "等待规划";
+  $("#budgetWorkers").textContent = `${budget.peak_workers || 0} / ${limits.max_concurrent_workers || 0}`;
+  $("#budgetSearches").textContent = `${budget.searches || 0} / ${limits.max_searches || 0}`;
+  $("#budgetTokens").textContent = Number((budget.input_tokens || 0) + (budget.output_tokens || 0)).toLocaleString("zh-CN");
+  $("#budgetCost").textContent = `$${Number(budget.estimated_cost_usd || 0).toFixed(4)}`;
+  $("#budgetElapsed").textContent = `${(Number(budget.elapsed_ms || 0) / 1000).toFixed(1)}s`;
+  const estimateNode = $("#planEstimate");
+  if (budget.exhausted_reason) {
+    estimateNode.className = "plan-estimate exhausted";
+    estimateNode.textContent = `预算断路：${budget.exhausted_reason}`;
+  } else if (estimate) {
+    estimateNode.className = "plan-estimate";
+    const quality = metrics.claim_support_rate == null
+      ? ""
+      : ` 当前 Claim 支持率 ${Math.round(metrics.claim_support_rate * 100)}%，引用落库率 ${Math.round((metrics.citation_grounding_rate || 0) * 100)}%，独立域名 ${metrics.independent_domains || 0}。`;
+    estimateNode.textContent = `执行前估算：${estimate.task_count} 个任务、${estimate.estimated_searches} 次搜索、${Number(estimate.estimated_input_tokens + estimate.estimated_output_tokens).toLocaleString("zh-CN")} tokens、$${Number(estimate.estimated_cost_usd || 0).toFixed(4)}；${lead.reason || ""}${quality}`;
+  } else {
+    estimateNode.className = "plan-estimate";
+    estimateNode.textContent = "Planner 完成后显示执行前估算。";
+  }
 }
 
 function updateExecutionButtons() {
@@ -479,9 +565,12 @@ function renderTasks(tasks) {
     const quality = Number.isFinite(task.quality_score)
       ? `<span>· 质量 ${task.quality_score}/100</span><span>· Tavily ${task.search_count || 0} 次</span>`
       : "";
+    const budget = task.budget
+      ? `<span>· 预算 搜索 ${task.budget.max_searches} / 来源 ${task.budget.max_sources} / ${task.budget.max_seconds}s</span>`
+      : "";
     return `<article class="task-item ${escapeHtml(task.status)}">
       <span class="task-index">${task.status === "completed" ? "✓" : String(index + 1).padStart(2, "0")}</span>
-      <div class="task-copy"><strong>${escapeHtml(task.title)}</strong><p>${escapeHtml(detail)}</p><div class="task-meta"><span>${escapeHtml(dependency)}</span><span>· 尝试 ${task.attempts}</span>${quality}</div></div>
+      <div class="task-copy"><strong>${escapeHtml(task.title)}</strong><p>${escapeHtml(detail)}</p><div class="task-meta"><span>${escapeHtml(dependency)}</span><span>· 尝试 ${task.attempts}</span>${quality}${budget}</div></div>
       <span class="agent-pill">${escapeHtml(task.assigned_agent)} · ${escapeHtml(taskStatusLabels[task.status] || task.status)}</span>
     </article>`;
   }).join("");
@@ -526,6 +615,7 @@ const reasoningLabels = {
   plan_created: "生成研究计划与任务依赖",
   tasks_dispatched: "Supervisor 分派任务",
   task_completed: "Agent 完成研究节点",
+  context_hard_compressed: "硬水位压缩并保存上下文快照",
   workflow_completed: "交叉验证完成并生成报告",
   workflow_failed: "工作流终止",
   human_intervention: "等待人工确认",
@@ -551,6 +641,33 @@ function renderReasoning(steps, run) {
     const duration = Number.isFinite(step.duration_ms) ? ` · ${Math.round(step.duration_ms)} ms` : "";
     return `<article class="reasoning-step ${escapeHtml(step.status)}">
       <i></i><div><strong>${escapeHtml(title)}</strong><p>${escapeHtml(step.detail || model || "已记录安全执行摘要")}</p><small>${escapeHtml(step.kind)}${tokens}${duration}</small></div>
+    </article>`;
+  }).join("");
+}
+
+function renderContextCompressions(events) {
+  const saved = events.reduce((total, event) => total + (event.saved_chars || 0), 0);
+  const hard = events.filter((event) => event.trigger === "hard").length;
+  const references = events.reduce(
+    (total, event) => total + (event.references_preserved || 0),
+    0,
+  );
+  $("#compressionCount").textContent = events.length;
+  $("#compressionSaved").textContent = saved.toLocaleString("zh-CN");
+  $("#compressionHardCount").textContent = hard;
+  $("#compressionReferences").textContent = references;
+  const node = $("#compressionList");
+  if (!events.length) {
+    node.innerHTML = '<p class="empty-provenance">尚未达到上下文软水位。</p>';
+    return;
+  }
+  node.innerHTML = [...events].reverse().map((event) => {
+    const savedRate = Math.round((1 - (event.compression_ratio || 0)) * 100);
+    const checkpoint = event.checkpoint_required ? " · 已要求 Checkpoint" : "";
+    return `<article class="compression-item ${escapeHtml(event.trigger)}">
+      <div><strong>第 ${event.applied_level} 层 · ${event.trigger === "hard" ? "硬水位" : "软水位"}</strong><span>${savedRate}%</span></div>
+      <p>${Number(event.original_chars || 0).toLocaleString("zh-CN")} → ${Number(event.compressed_chars || 0).toLocaleString("zh-CN")} 字符 · 保留 ${event.references_preserved || 0} 个引用${checkpoint}</p>
+      <small>${escapeHtml(event.context_id)} · ${escapeHtml(event.boundary)}</small>
     </article>`;
   }).join("");
 }

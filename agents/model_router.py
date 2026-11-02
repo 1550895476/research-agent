@@ -9,7 +9,12 @@ from langchain_core.messages import BaseMessage
 from pydantic import BaseModel
 
 from agents.model import StructuredModel, StructuredOutput
-from core.observability import AgentObservability, estimate_tokens
+from core.budget import BudgetLedger
+from core.observability import (
+    AgentObservability,
+    current_observation_context,
+    estimate_tokens,
+)
 
 
 class RoutedTier(StrEnum):
@@ -41,11 +46,13 @@ class DynamicModelRouter:
         large_model: StructuredModel,
         *,
         observability: AgentObservability,
+        budget_ledger: BudgetLedger | None = None,
         complexity_chars: int = 4000,
     ) -> None:
         self._small_model = small_model
         self._large_model = large_model
         self._observability = observability
+        self._budget_ledger = budget_ledger
         self._complexity_chars = max(500, complexity_chars)
 
     def select(self, schema_name: str, prompt_chars: int) -> RoutedTier:
@@ -69,7 +76,85 @@ class DynamicModelRouter:
             metadata={"tier": tier.value, "schema": schema.__name__},
         ) as span:
             span.input_tokens = estimate_tokens(prompt)
+            self._reserve_input(tier, span.input_tokens)
             response = model.invoke(schema, messages)
             if isinstance(response, BaseModel):
                 span.output_tokens = estimate_tokens(response.model_dump_json())
+                self._record_output(tier, span.output_tokens)
+            return response
+
+    def _reserve_input(self, tier: RoutedTier, tokens: int) -> None:
+        context = current_observation_context()
+        if self._budget_ledger is None or context is None:
+            return
+        self._budget_ledger.reserve_model_input(
+            context.run_id,
+            context.task_id or context.agent or "workflow",
+            tier=tier.value,
+            tokens=tokens,
+        )
+
+    def _record_output(self, tier: RoutedTier, tokens: int) -> None:
+        context = current_observation_context()
+        if self._budget_ledger is None or context is None:
+            return
+        self._budget_ledger.record_model_output(
+            context.run_id,
+            context.task_id or context.agent or "workflow",
+            tier=tier.value,
+            tokens=tokens,
+        )
+
+
+class MeteredStructuredModel:
+    """Add observability and budget enforcement to a fixed-tier model."""
+
+    def __init__(
+        self,
+        model: StructuredModel,
+        *,
+        tier: RoutedTier,
+        observability: AgentObservability,
+        budget_ledger: BudgetLedger,
+    ) -> None:
+        self._model = model
+        self._tier = tier
+        self._observability = observability
+        self._budget_ledger = budget_ledger
+
+    def invoke(
+        self,
+        schema: type[StructuredOutput],
+        messages: Sequence[BaseMessage],
+    ) -> StructuredOutput:
+        prompt = "\n".join(str(message.content) for message in messages)
+        context = current_observation_context()
+        task_id = (
+            context.task_id or context.agent or "workflow"
+            if context is not None
+            else None
+        )
+        with self._observability.span(
+            "model.invoke",
+            kind="model",
+            metadata={"tier": self._tier.value, "schema": schema.__name__},
+        ) as span:
+            span.input_tokens = estimate_tokens(prompt)
+            if context is not None and task_id is not None:
+                self._budget_ledger.reserve_model_input(
+                    context.run_id,
+                    task_id,
+                    tier=self._tier.value,
+                    tokens=span.input_tokens,
+                )
+            response = self._model.invoke(schema, messages)
+            if isinstance(response, BaseModel):
+                span.output_tokens = estimate_tokens(response.model_dump_json())
+                if context is not None and task_id is not None:
+                    self._budget_ledger.record_model_output(
+                        context.run_id,
+                        task_id,
+                        tier=self._tier.value,
+                        tokens=span.output_tokens,
+                    )
             return response

@@ -7,9 +7,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
 
 from agents.model import StructuredModel
-from agents.researcher import _render_context
+from agents.researcher import _render_context, _task_snapshot
+from core.context_compression import ContextCompressor
 from graph.state import ResearchTask
-from tools.registry import ToolResult
 
 
 class VerifiedClaim(BaseModel):
@@ -66,19 +66,36 @@ class TaskQualityAssessment(BaseModel):
 class VerifierAgent:
     """Verify claims only against payloads actually provided by dependencies."""
 
-    def __init__(self, model: StructuredModel, *, max_context_chars: int = 16000) -> None:
+    def __init__(
+        self,
+        model: StructuredModel,
+        *,
+        max_context_chars: int = 16000,
+        context_compressor: ContextCompressor | None = None,
+    ) -> None:
         self._model = model
         self._max_context_chars = max_context_chars
+        self._context_compressor = context_compressor or ContextCompressor(
+            max_chars=max_context_chars
+        )
 
     def verify(
         self,
         user_goal: str,
         task: ResearchTask,
         dependency_payloads: Sequence[Any],
+        *,
+        context_id: str | None = None,
     ) -> VerificationOutput:
         """Check support, disagreement, and uncertainty for material claims."""
 
-        context = _render_context(dependency_payloads, self._max_context_chars)
+        context = _render_context(
+            dependency_payloads,
+            self._max_context_chars,
+            compressor=self._context_compressor,
+            context_id=context_id or f"task:{task.task_id}:verifier",
+            snapshot=_task_snapshot(user_goal, task),
+        )
         messages = [
             SystemMessage(
                 content=(
@@ -103,6 +120,8 @@ class VerifierAgent:
         task: ResearchTask,
         candidate_payload: Any,
         evidence_payloads: Sequence[Any],
+        *,
+        context_id: str | None = None,
     ) -> TaskQualityAssessment:
         """Score one research task and propose only in-scope evidence-gap queries."""
 
@@ -110,6 +129,10 @@ class VerifierAgent:
             candidate_payload,
             evidence_payloads,
             self._max_context_chars,
+            compressor=self._context_compressor,
+            context_id=context_id or f"task:{task.task_id}:quality_gate",
+            user_goal=user_goal,
+            task=task,
         )
         messages = [
             SystemMessage(
@@ -141,44 +164,18 @@ def _render_quality_context(
     candidate_payload: Any,
     evidence_payloads: Sequence[Any],
     max_chars: int,
+    *,
+    compressor: ContextCompressor | None = None,
+    context_id: str = "agent:quality_gate",
+    user_goal: str = "Verify the current research task.",
+    task: ResearchTask | None = None,
 ) -> str:
     """Preserve a compact sample from every source for criterion-level verification."""
-
-    candidate = (
-        candidate_payload.model_dump_json(indent=2)
-        if isinstance(candidate_payload, BaseModel)
-        else str(candidate_payload)
-    )
-    candidate_budget = min(len(candidate), max(1000, int(max_chars * 0.4)))
-    sections = [f"Candidate findings:\n{candidate[:candidate_budget]}"]
-    remaining = max(0, max_chars - len(sections[0]))
-    tool_results = [
-        payload for payload in evidence_payloads if isinstance(payload, ToolResult)
-    ]
-    evidence_count = sum(len(result.evidences) for result in tool_results)
-    snippet_chars = max(120, min(500, remaining // max(1, evidence_count) - 100))
-    for result in tool_results:
-        query = (
-            str(result.data.get("query", "")).strip()
-            if isinstance(result.data, dict)
-            else ""
-        )
-        lines = [f"Search query: {query or 'n/a'}"]
-        for evidence in result.evidences:
-            lines.append(
-                " | ".join(
-                    (
-                        evidence.evidence_id,
-                        evidence.title,
-                        evidence.source_uri,
-                        evidence.content[:snippet_chars],
-                    )
-                )
-            )
-        sections.append("\n".join(lines))
-    other_payloads = [
-        payload for payload in evidence_payloads if not isinstance(payload, ToolResult)
-    ]
-    if other_payloads:
-        sections.append(_render_context(other_payloads, max(500, remaining // 4)))
-    return "\n\n".join(sections)[:max_chars]
+    active_compressor = compressor or ContextCompressor(max_chars=max_chars)
+    snapshot = _task_snapshot(user_goal, task) if task is not None else None
+    return active_compressor.compress_payloads(
+        [candidate_payload, *evidence_payloads],
+        context_id=context_id,
+        snapshot=snapshot,
+        max_chars=max_chars,
+    ).text

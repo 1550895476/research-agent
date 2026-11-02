@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agents.runtime import AgentRuntime
-from api.main import _follow_up_goal, _research_response, create_app
+from api.main import _follow_up_context, _follow_up_goal, _research_response, create_app
 from core.config import Settings
 from graph.state import WorkflowStatus, create_initial_state
 from tests.test_agents import SchemaFakeModel
@@ -304,16 +304,23 @@ def test_http_api_supports_follow_up_turn_with_model_selection(
 
 
 def test_follow_up_context_is_bounded_and_keeps_current_message() -> None:
+    parent = {
+        "run_id": "turn-1",
+        "user_message": "第一轮问题",
+        "final_report": "上一轮结论" * 500,
+    }
     goal = _follow_up_goal(
-        {
-            "user_message": "第一轮问题",
-            "final_report": "上一轮结论" * 500,
-        },
+        parent,
         "当前追问",
         1200,
     )
+    compressed = _follow_up_context(parent, "当前追问", 1200)
 
     assert goal is not None
+    assert compressed is not None
+    assert compressed.record is not None
+    assert compressed.record.boundary == "conversation_turn"
+    assert compressed.record.checkpoint_required is True
     assert "第一轮问题" in goal
     assert goal.endswith("当前追问")
     assert len(goal) < 1400

@@ -7,6 +7,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
 
 from agents.model import StructuredModel
+from core.context_compression import ContextCompressor, ContextSnapshot
 from graph.state import ResearchTask
 from rag.retriever import SourceType
 
@@ -59,19 +60,31 @@ class ResearcherAgent:
         model: StructuredModel,
         *,
         max_context_chars: int = 16000,
+        context_compressor: ContextCompressor | None = None,
     ) -> None:
         self._model = model
         self._max_context_chars = max_context_chars
+        self._context_compressor = context_compressor or ContextCompressor(
+            max_chars=max_context_chars
+        )
 
     def research(
         self,
         user_goal: str,
         task: ResearchTask,
         dependency_payloads: Sequence[Any] = (),
+        *,
+        context_id: str | None = None,
     ) -> ResearchOutput:
         """Synthesize supplied tool evidence and identify focused follow-up searches."""
 
-        context = _render_context(dependency_payloads, self._max_context_chars)
+        context = _render_context(
+            dependency_payloads,
+            self._max_context_chars,
+            compressor=self._context_compressor,
+            context_id=context_id or f"task:{task.task_id}:researcher",
+            snapshot=_task_snapshot(user_goal, task),
+        )
         messages = [
             SystemMessage(
                 content=(
@@ -99,13 +112,39 @@ class ResearcherAgent:
         return self._model.invoke(ResearchOutput, messages)
 
 
-def _render_context(payloads: Sequence[Any], max_chars: int) -> str:
+def _render_context(
+    payloads: Sequence[Any],
+    max_chars: int,
+    *,
+    compressor: ContextCompressor | None = None,
+    context_id: str = "agent:dependencies",
+    snapshot: ContextSnapshot | None = None,
+) -> str:
     if not payloads:
         return "No dependency payloads."
-    rendered: list[str] = []
-    for payload in payloads:
-        if isinstance(payload, BaseModel):
-            rendered.append(payload.model_dump_json(indent=2))
-        else:
-            rendered.append(str(payload))
-    return "\n\n".join(rendered)[:max_chars]
+    active_compressor = compressor or ContextCompressor(max_chars=max_chars)
+    return active_compressor.compress_payloads(
+        payloads,
+        context_id=context_id,
+        snapshot=snapshot,
+        max_chars=max_chars,
+    ).text
+
+
+def _task_snapshot(user_goal: str, task: ResearchTask) -> ContextSnapshot:
+    references = tuple((*task.source_url_prefixes, *task.source_domains))
+    return ContextSnapshot(
+        goal=user_goal,
+        constraints=tuple(
+            dict.fromkeys(
+                (
+                    f"Task scope: {task.description}",
+                    *(f"Completion criterion: {item}" for item in task.completion_criteria),
+                )
+            )
+        ),
+        pending_items=(task.title,),
+        exact_references=references,
+        validation_results=tuple(task.quality_gaps),
+        next_action=f"Complete task {task.task_id} without expanding its scope.",
+    )

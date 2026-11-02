@@ -30,8 +30,36 @@ class Settings(BaseSettings):
     model_timeout_seconds: float = Field(default=60.0, gt=0)
     model_max_retries: int = Field(default=2, ge=0, le=10)
     max_agent_context_chars: int = Field(default=16000, ge=1000)
+    context_soft_watermark: float = Field(default=0.70, gt=0, lt=1)
+    context_hard_watermark: float = Field(default=0.85, gt=0, lt=1)
+    context_tool_result_max_chars: int = Field(default=2400, ge=200)
+    context_summary_max_chars: int = Field(default=1200, ge=200)
+    context_compression_max_events: int = Field(default=1000, ge=10, le=100000)
     dynamic_model_routing: bool = True
     model_router_complexity_chars: int = Field(default=4000, ge=500, le=100000)
+
+    max_concurrent_workers: int = Field(default=5, ge=1, le=100)
+    max_total_tasks: int = Field(default=12, ge=3, le=100)
+    max_total_searches: int = Field(default=100, ge=1, le=10000)
+    max_total_input_tokens: int = Field(default=500000, ge=1000, le=100000000)
+    max_total_output_tokens: int = Field(default=200000, ge=1000, le=100000000)
+    max_total_cost_usd: float = Field(default=0, ge=0)
+    max_run_seconds: float = Field(default=1200, gt=0, le=604800)
+    max_conflict_tasks: int = Field(default=2, ge=0, le=20)
+    small_input_cost_per_million: float = Field(default=0, ge=0)
+    small_output_cost_per_million: float = Field(default=0, ge=0)
+    large_input_cost_per_million: float = Field(default=0, ge=0)
+    large_output_cost_per_million: float = Field(default=0, ge=0)
+    task_max_searches: int = Field(default=10, ge=0, le=100)
+    task_max_sources: int = Field(default=12, ge=1, le=200)
+    task_max_input_tokens: int = Field(default=60000, ge=100, le=10000000)
+    task_max_output_tokens: int = Field(default=20000, ge=100, le=10000000)
+    task_max_seconds: float = Field(default=300, gt=0, le=86400)
+    task_max_retries: int = Field(default=2, ge=0, le=20)
+    plan_approval_mode: Literal["off", "auto", "always"] = "auto"
+    plan_approval_task_threshold: int = Field(default=8, ge=3, le=100)
+    plan_approval_token_threshold: int = Field(default=200000, ge=1000)
+    plan_approval_cost_threshold_usd: float = Field(default=5, ge=0)
 
     tavily_api_key: SecretStr | None = None
     tools_enabled: bool = False
@@ -86,6 +114,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_research_budgets(self) -> Self:
+        if self.context_soft_watermark >= self.context_hard_watermark:
+            raise ValueError(
+                "CONTEXT_SOFT_WATERMARK must be lower than CONTEXT_HARD_WATERMARK"
+            )
         if self.research_max_searches_per_task < self.research_initial_searches:
             raise ValueError(
                 "RESEARCH_MAX_SEARCHES_PER_TASK must be >= RESEARCH_INITIAL_SEARCHES"
@@ -99,6 +131,10 @@ class Settings(BaseSettings):
                 "RESEARCH_MIN_INDEPENDENT_DOMAINS must be <= "
                 "RESEARCH_MIN_UNIQUE_SOURCES"
             )
+        if self.max_concurrent_workers > self.max_total_tasks:
+            raise ValueError("MAX_CONCURRENT_WORKERS must be <= MAX_TOTAL_TASKS")
+        if self.task_max_searches > self.max_total_searches:
+            raise ValueError("TASK_MAX_SEARCHES must be <= MAX_TOTAL_SEARCHES")
         return self
 
 

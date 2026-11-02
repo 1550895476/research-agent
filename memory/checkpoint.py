@@ -17,10 +17,14 @@ from psycopg.rows import dict_row
 from core.config import Settings
 
 _ALLOWED_STATE_TYPES = (
+    ("core.budget", "TaskBudget"),
+    ("core.context_compression", "ContextCompressionRecord"),
     ("graph.state", "AgentName"),
     ("graph.state", "CheckpointReference"),
     ("graph.state", "EvidenceReference"),
     ("graph.state", "HumanRequest"),
+    ("graph.state", "LeadDecision"),
+    ("graph.state", "PlanEstimate"),
     ("graph.state", "ResearchRequirement"),
     ("graph.state", "ResearchTask"),
     ("graph.state", "ResearchType"),

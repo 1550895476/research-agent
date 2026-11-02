@@ -10,6 +10,9 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from core.budget import TaskBudget
+from core.context_compression import ContextCompressionRecord
+
 
 class AgentName(StrEnum):
     """Worker nodes that can receive a planned task."""
@@ -67,6 +70,33 @@ class ResearchRequirement(BaseModel):
     language: str = "zh-CN"
 
 
+class PlanEstimate(BaseModel):
+    """Non-billing pre-flight estimate shown before costly parallel execution."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    task_count: int = Field(ge=0)
+    research_workers: int = Field(ge=0)
+    estimated_searches: int = Field(ge=0)
+    estimated_input_tokens: int = Field(ge=0)
+    estimated_output_tokens: int = Field(ge=0)
+    estimated_cost_usd: float = Field(ge=0)
+    estimated_seconds: float = Field(ge=0)
+    token_counting: Literal["estimated"] = "estimated"
+
+
+class LeadDecision(BaseModel):
+    """Auditable single-agent versus multi-agent routing decision."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    mode: Literal["single", "multi"]
+    recommended_workers: int = Field(ge=1)
+    reason: str
+    requires_approval: bool = False
+    approval_token: str | None = None
+
+
 class ResearchTask(BaseModel):
     """A schedulable unit of work and its dependency/status metadata."""
 
@@ -82,6 +112,7 @@ class ResearchTask(BaseModel):
     dependencies: tuple[str, ...] = ()
     status: TaskStatus = TaskStatus.PENDING
     assigned_agent: AgentName
+    budget: TaskBudget = Field(default_factory=TaskBudget)
     attempts: int = Field(default=0, ge=0)
     result_ids: tuple[str, ...] = ()
     evidence_ids: tuple[str, ...] = ()
@@ -252,11 +283,14 @@ class AgentState(TypedDict):
     run_id: str
     user_id: str
     requirements: ResearchRequirement | None
+    lead_decision: LeadDecision | None
+    plan_estimate: PlanEstimate | None
     tasks: Annotated[list[ResearchTask], merge_tasks]
     current_task: str | None
     evidences: Annotated[dict[str, EvidenceReference], merge_references]
     intermediate_results: Annotated[dict[str, ResultReference], merge_references]
     final_report: str | None
+    context_compressions: Annotated[list[ContextCompressionRecord], append_items]
     errors: Annotated[list[WorkflowError], append_items]
     checkpoints: Annotated[list[CheckpointReference], append_items]
     replan_requests: Annotated[list[ReplanRequest], append_items]
@@ -373,6 +407,7 @@ def create_initial_state(
     user_message: str | None = None,
     parent_run_id: str | None = None,
     selected_model: str | None = None,
+    context_compressions: Iterable[ContextCompressionRecord] | None = None,
 ) -> AgentState:
     """Validate user input and create a complete graph state."""
 
@@ -401,11 +436,14 @@ def create_initial_state(
         run_id=normalized_run_id,
         user_id=normalized_user_id,
         requirements=None,
+        lead_decision=None,
+        plan_estimate=None,
         tasks=planned_tasks,
         current_task=None,
         evidences={},
         intermediate_results={},
         final_report=None,
+        context_compressions=list(context_compressions or ()),
         errors=[],
         checkpoints=[],
         replan_requests=[],

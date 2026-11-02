@@ -7,6 +7,7 @@ from enum import StrEnum
 import psycopg
 from pydantic import BaseModel, ConfigDict
 
+from core.budget import BudgetExceeded
 from graph.state import AgentName, ResearchTask
 from guardrail.middleware import (
     HumanApprovalRequired,
@@ -70,6 +71,8 @@ class RecoveryPolicy:
     ) -> RecoveryDecision:
         if not self.enabled:
             return RecoveryDecision(action=RecoveryAction.FAIL, reason=str(error))
+        if isinstance(error, BudgetExceeded):
+            return RecoveryDecision(action=RecoveryAction.FAIL, reason=str(error))
         if isinstance(
             error,
             HumanApprovalRequired | ToolPermissionDenied | ToolQuotaExceeded,
@@ -95,7 +98,8 @@ class RecoveryPolicy:
                 psycopg.OperationalError,
             ),
         ) or task.assigned_agent in {AgentName.RETRIEVER, AgentName.DATABASE}
-        if retryable and failure_count <= self.max_tool_retries:
+        retry_limit = min(self.max_tool_retries, task.budget.max_retries)
+        if retryable and failure_count <= retry_limit:
             return RecoveryDecision(
                 action=RecoveryAction.RETRY,
                 reason=str(error),

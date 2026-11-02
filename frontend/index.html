@@ -113,6 +113,21 @@
               <div class="progress-track"><span id="progressBar"></span></div>
             </div>
 
+            <section class="panel budget-panel">
+              <div class="panel-heading">
+                <div><span class="eyebrow">RUN BUDGET</span><h3>Lead 决策与资源预算</h3></div>
+                <span id="leadMode" class="active-agent">等待规划</span>
+              </div>
+              <div class="budget-metrics">
+                <div><strong id="budgetWorkers">0 / 0</strong><small>Worker 峰值 / 上限</small></div>
+                <div><strong id="budgetSearches">0 / 0</strong><small>搜索次数</small></div>
+                <div><strong id="budgetTokens">0</strong><small>估算 Token</small></div>
+                <div><strong id="budgetCost">$0.0000</strong><small>估算费用</small></div>
+                <div><strong id="budgetElapsed">0s</strong><small>运行耗时</small></div>
+              </div>
+              <div id="planEstimate" class="plan-estimate">Planner 完成后显示执行前估算。</div>
+            </section>
+
             <div class="run-grid">
               <section class="panel task-panel">
                 <div class="panel-heading"><div><span class="eyebrow">EXECUTION GRAPH</span><h3>Agent 执行节点</h3></div><span id="activeAgent" class="active-agent">等待调度</span></div>
@@ -136,6 +151,20 @@
                 <span class="trace-note">展示规划与调用摘要，不展示私有思维链</span>
               </div>
               <div id="reasoningTimeline" class="reasoning-timeline"><p class="empty-provenance">正在等待 Planner 生成第一步计划…</p></div>
+            </section>
+
+            <section class="panel context-panel">
+              <div class="panel-heading">
+                <div><span class="eyebrow">CONTEXT COMPRESSION</span><h3>上下文水位与压缩记录</h3></div>
+                <span class="trace-note">软水位自然压缩 · 硬水位强制快照</span>
+              </div>
+              <div class="context-metrics">
+                <div><strong id="compressionCount">0</strong><small>压缩次数</small></div>
+                <div><strong id="compressionSaved">0</strong><small>节省字符</small></div>
+                <div><strong id="compressionHardCount">0</strong><small>硬水位触发</small></div>
+                <div><strong id="compressionReferences">0</strong><small>保留引用</small></div>
+              </div>
+              <div id="compressionList" class="compression-list"><p class="empty-provenance">尚未达到上下文软水位。</p></div>
             </section>
 
             <section class="panel provenance-panel">
@@ -203,7 +232,35 @@
         </div>
 
         <div class="settings-section">
-          <div class="settings-section-title"><span>02</span><div><h3>搜索与调试</h3><p>联网调研必须配置 Tavily；LangSmith 为可选能力。</p></div></div>
+          <div class="settings-section-title"><span>02</span><div><h3>Multi-Agent 预算</h3><p>限制并发、总任务、Token、搜索、费用与运行时间；超限时自动断路。</p></div></div>
+          <div class="form-grid">
+            <label>最大并发 Worker<input id="maxConcurrentWorkers" type="number" min="1" max="100" value="5" /></label>
+            <label>最大总任务数<input id="maxTotalTasks" type="number" min="3" max="100" value="12" /></label>
+            <label>全局最大搜索次数<input id="maxTotalSearches" type="number" min="1" max="10000" value="100" /></label>
+            <label>运行时长上限（秒）<input id="maxRunSeconds" type="number" min="1" max="604800" value="1200" /></label>
+            <label>最多冲突裁决任务<input id="maxConflictTasks" type="number" min="0" max="20" value="2" /></label>
+            <label>输入 Token 上限<input id="maxTotalInputTokens" type="number" min="1000" value="500000" /></label>
+            <label>输出 Token 上限<input id="maxTotalOutputTokens" type="number" min="1000" value="200000" /></label>
+            <label>费用上限（USD，0 表示关闭）<input id="maxTotalCostUsd" type="number" min="0" step="0.01" value="0" /></label>
+            <label>计划审批模式<select id="planApprovalMode"><option value="auto">超过阈值时确认</option><option value="always">每次都确认</option><option value="off">关闭确认</option></select></label>
+            <label>单任务最大搜索<input id="taskMaxSearches" type="number" min="0" max="100" value="10" /></label>
+            <label>单任务最大来源<input id="taskMaxSources" type="number" min="1" max="200" value="12" /></label>
+            <label>单任务输入 Token<input id="taskMaxInputTokens" type="number" min="100" value="60000" /></label>
+            <label>单任务输出 Token<input id="taskMaxOutputTokens" type="number" min="100" value="20000" /></label>
+            <label>单任务时长（秒）<input id="taskMaxSeconds" type="number" min="1" max="86400" value="300" /></label>
+            <label>单任务最大重试<input id="taskMaxRetries" type="number" min="0" max="20" value="2" /></label>
+            <label>轻量模型输入价 / 百万 Token<input id="smallInputPrice" type="number" min="0" step="0.0001" value="0" /></label>
+            <label>轻量模型输出价 / 百万 Token<input id="smallOutputPrice" type="number" min="0" step="0.0001" value="0" /></label>
+            <label>高能力模型输入价 / 百万 Token<input id="largeInputPrice" type="number" min="0" step="0.0001" value="0" /></label>
+            <label>高能力模型输出价 / 百万 Token<input id="largeOutputPrice" type="number" min="0" step="0.0001" value="0" /></label>
+            <label>审批任务数阈值<input id="approvalTaskThreshold" type="number" min="3" max="100" value="8" /></label>
+            <label>审批 Token 阈值<input id="approvalTokenThreshold" type="number" min="1000" value="200000" /></label>
+            <label>审批费用阈值（USD）<input id="approvalCostThreshold" type="number" min="0" step="0.01" value="5" /></label>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title"><span>03</span><div><h3>搜索与调试</h3><p>联网调研必须配置 Tavily；LangSmith 为可选能力。</p></div></div>
           <div class="form-grid">
             <label class="full">Tavily API Key（实时调研必填）<div class="secret-field"><input id="tavilyApiKey" type="password" autocomplete="new-password" placeholder="输入 Tavily API Key" /><button type="button" data-toggle-secret="tavilyApiKey">显示</button></div></label>
             <label class="toggle-row"><span><strong>启用外部工具</strong><small>允许 Agent 使用 Tavily；内部数据库默认关闭且不阻塞任务</small></span><input id="toolsEnabled" type="checkbox" /></label>
@@ -218,6 +275,17 @@
             <label class="toggle-row"><span><strong>LangSmith Trace</strong><small>上传执行链路用于调试</small></span><input id="langsmithTracing" type="checkbox" /></label>
             <label class="full">LangSmith API Key<div class="secret-field"><input id="langsmithApiKey" type="password" autocomplete="new-password" placeholder="仅启用 Trace 时需要" /><button type="button" data-toggle-secret="langsmithApiKey">显示</button></div></label>
             <label class="full">LangSmith Project<input id="langsmithProject" placeholder="research-agent-local" /></label>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title"><span>04</span><div><h3>上下文压缩</h3><p>按自然任务边界应用五层压缩；硬水位会生成可恢复状态快照。</p></div></div>
+          <div class="form-grid">
+            <label>Agent 上下文字符预算<input id="maxAgentContextChars" type="number" min="1000" max="1000000" value="16000" /></label>
+            <label>工具结果单项上限<input id="toolResultMaxChars" type="number" min="200" max="100000" value="2400" /></label>
+            <label>软水位（0–1）<input id="softWatermark" type="number" min="0.05" max="0.94" step="0.01" value="0.70" /></label>
+            <label>硬水位（0–1）<input id="hardWatermark" type="number" min="0.06" max="0.99" step="0.01" value="0.85" /></label>
+            <label>摘要单段上限<input id="summaryMaxChars" type="number" min="200" max="100000" value="1200" /></label>
           </div>
         </div>
 

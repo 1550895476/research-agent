@@ -12,6 +12,7 @@
 - 长文本结果写入线程安全的 Blackboard，LangGraph State 只传递 `task_id`、`result_id` 与引用 URI。
 - 支持 LangGraph InMemory/PostgreSQL Checkpoint，并可通过 `thread_id` 从中断位置继续执行。
 - 支持持久化多轮研究会话：每轮使用独立 `thread_id`，通过 `conversation_id` 与 `parent_thread_id` 继承上一轮报告并恢复完整对话链。
+- 支持双水位上下文压缩：在自然任务边界依次执行可再生引用、工具结果裁剪、旧轮次粗粒度化、分段摘要和状态快照；硬水位事件随 Checkpoint 保存，并通过 API/UI 展示压缩层级、节省字符数与保留引用。
 - PostgreSQL + pgvector 长期记忆保存用户偏好、历史研究和高价值证据；Planner 会读取相关历史。
 - Episodic Memory 记录需求解析、Planner 决策、Supervisor 路由、任务结果与失败原因。
 - 记忆生命周期包含价值评分、长度压缩、幂等更新、访问增值、过期/低价值/容量淘汰。
@@ -292,6 +293,48 @@ LANGSMITH_PROJECT=research-agent-local
 ```
 
 即使未启用 LangSmith，进程内仍会记录结构化 Trace。OpenAI 兼容服务未返回 usage 时，Token 字段明确使用字符长度估算，不伪装为供应商实际计费值。
+
+## Lead 路由、预算与计划审批
+
+Lead 会根据研究类型、关键问题数量和比较/行业类关键词，在 Single-Agent 与 Multi-Agent 之间确定性路由。Planner 为每个任务生成包含搜索、来源、Token、时长和重试上限的任务合同；服务端会把模型提出的额度夹紧到配置上限。所有 Worker 共享全局并发、总任务、搜索、Token、费用和运行时长断路器。
+
+```dotenv
+MAX_CONCURRENT_WORKERS=5
+MAX_TOTAL_TASKS=12
+MAX_TOTAL_SEARCHES=100
+MAX_TOTAL_INPUT_TOKENS=500000
+MAX_TOTAL_OUTPUT_TOKENS=200000
+MAX_TOTAL_COST_USD=0
+MAX_RUN_SECONDS=1200
+TASK_MAX_SEARCHES=10
+TASK_MAX_SOURCES=12
+TASK_MAX_INPUT_TOKENS=60000
+TASK_MAX_OUTPUT_TOKENS=20000
+TASK_MAX_SECONDS=300
+PLAN_APPROVAL_MODE=auto
+PLAN_APPROVAL_TASK_THRESHOLD=8
+PLAN_APPROVAL_TOKEN_THRESHOLD=200000
+PLAN_APPROVAL_COST_THRESHOLD_USD=5
+```
+
+`MAX_TOTAL_COST_USD=0` 表示不启用费用断路；配置各模型的每百万 Token 单价后，API 才会返回可用于断路的估算费用。`/research` 响应中的 `lead_decision`、`plan_estimate` 和 `budget` 分别给出路由理由、执行前估算和运行中实际估算。高成本计划会使用 `plan:<run_id>` 审批令牌暂停，确认后才分发 Worker。
+
+Researcher、Retriever 和 Database Worker 只能发现并执行搜索、读取、知识库和只读数据库能力；任何声明 `write`、`send`、`deploy`、`delete`、`mutate` 或 `admin` 能力的工具都会在角色边界被拒绝。
+
+## 上下文压缩
+
+压缩在 Agent Prompt 组装和多轮继承两个自然边界执行。低于软水位时上下文保持不变；超过软水位后按五层阶梯逐层压缩，降到软水位即停止；超过硬水位时会强制生成包含目标、约束、决策理由、未完成事项、精确引用、验证结果和下一步行动的状态快照。
+
+```dotenv
+MAX_AGENT_CONTEXT_CHARS=16000
+CONTEXT_SOFT_WATERMARK=0.70
+CONTEXT_HARD_WATERMARK=0.85
+CONTEXT_TOOL_RESULT_MAX_CHARS=2400
+CONTEXT_SUMMARY_MAX_CHARS=1200
+CONTEXT_COMPRESSION_MAX_EVENTS=1000
+```
+
+每次压缩记录会出现在 `/research` 响应的 `context_compressions` 中。记录包含触发水位、最高压缩层级、压缩前后字符数、内容哈希、保留引用数、Prompt Cache 前缀是否变化，以及是否要求硬水位 Checkpoint。
 
 ## Docker 运行
 

@@ -184,6 +184,12 @@ def observation_scope(
         _current_context.reset(token)
 
 
+def current_observation_context() -> ObservationContext | None:
+    """Return the active execution identity for metering and policy enforcement."""
+
+    return _current_context.get()
+
+
 def estimate_tokens(text: str) -> int:
     """Cheap deterministic estimate when an OpenAI-compatible endpoint omits usage."""
 

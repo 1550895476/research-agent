@@ -16,12 +16,23 @@ from starlette.staticfiles import StaticFiles
 
 from agents.model import ModelConfigurationError
 from agents.runtime import AgentRuntime, run_agent_workflow
+from core.budget import BudgetSnapshot
 from core.config import Settings, get_settings
+from core.context_compression import (
+    CompressionResult,
+    ContextCompressionRecord,
+    ContextCompressor,
+    ContextItem,
+    ContextSnapshot,
+)
+from evals.metrics import ResearchQualityMetrics, evaluate_research_quality
 from evidence.store import EvidenceRecord, ToolCallRecord
 from graph.state import (
     AgentName,
     HumanFeedback,
     HumanRequest,
+    LeadDecision,
+    PlanEstimate,
     ResearchTask,
     WorkflowError,
     WorkflowStatus,
@@ -58,6 +69,11 @@ class RuntimeConfigResponse(BaseModel):
     large_model: str | None
     available_models: list[str]
     structured_output_method: str
+    max_agent_context_chars: int
+    context_soft_watermark: float
+    context_hard_watermark: float
+    context_tool_result_max_chars: int
+    context_summary_max_chars: int
     openai_configured: bool
     tavily_configured: bool
     tools_enabled: bool
@@ -70,6 +86,28 @@ class RuntimeConfigResponse(BaseModel):
     research_min_unique_sources: int
     research_min_independent_domains: int
     dynamic_model_routing: bool
+    max_concurrent_workers: int
+    max_total_tasks: int
+    max_total_searches: int
+    max_total_input_tokens: int
+    max_total_output_tokens: int
+    max_total_cost_usd: float
+    max_run_seconds: float
+    max_conflict_tasks: int
+    small_input_cost_per_million: float
+    small_output_cost_per_million: float
+    large_input_cost_per_million: float
+    large_output_cost_per_million: float
+    task_max_searches: int
+    task_max_sources: int
+    task_max_input_tokens: int
+    task_max_output_tokens: int
+    task_max_seconds: float
+    task_max_retries: int
+    plan_approval_mode: str
+    plan_approval_task_threshold: int
+    plan_approval_token_threshold: int
+    plan_approval_cost_threshold_usd: float
     langsmith_tracing: bool
     langsmith_configured: bool
     langsmith_project: str
@@ -84,6 +122,11 @@ class RuntimeConfigUpdate(BaseModel):
     small_model: str | None = Field(default=None, min_length=1, max_length=300)
     large_model: str | None = Field(default=None, min_length=1, max_length=300)
     structured_output_method: Literal["json_schema", "function_calling", "json_mode"] | None = None
+    max_agent_context_chars: int | None = Field(default=None, ge=1000, le=1000000)
+    context_soft_watermark: float | None = Field(default=None, gt=0, lt=1)
+    context_hard_watermark: float | None = Field(default=None, gt=0, lt=1)
+    context_tool_result_max_chars: int | None = Field(default=None, ge=200, le=100000)
+    context_summary_max_chars: int | None = Field(default=None, ge=200, le=100000)
     tavily_api_key: SecretStr | None = None
     clear_tavily_api_key: bool = False
     tools_enabled: bool | None = None
@@ -96,6 +139,28 @@ class RuntimeConfigUpdate(BaseModel):
     research_min_unique_sources: int | None = Field(default=None, ge=1, le=100)
     research_min_independent_domains: int | None = Field(default=None, ge=1, le=50)
     dynamic_model_routing: bool | None = None
+    max_concurrent_workers: int | None = Field(default=None, ge=1, le=100)
+    max_total_tasks: int | None = Field(default=None, ge=3, le=100)
+    max_total_searches: int | None = Field(default=None, ge=1, le=10000)
+    max_total_input_tokens: int | None = Field(default=None, ge=1000)
+    max_total_output_tokens: int | None = Field(default=None, ge=1000)
+    max_total_cost_usd: float | None = Field(default=None, ge=0)
+    max_run_seconds: float | None = Field(default=None, gt=0, le=604800)
+    max_conflict_tasks: int | None = Field(default=None, ge=0, le=20)
+    small_input_cost_per_million: float | None = Field(default=None, ge=0)
+    small_output_cost_per_million: float | None = Field(default=None, ge=0)
+    large_input_cost_per_million: float | None = Field(default=None, ge=0)
+    large_output_cost_per_million: float | None = Field(default=None, ge=0)
+    task_max_searches: int | None = Field(default=None, ge=0, le=100)
+    task_max_sources: int | None = Field(default=None, ge=1, le=200)
+    task_max_input_tokens: int | None = Field(default=None, ge=100)
+    task_max_output_tokens: int | None = Field(default=None, ge=100)
+    task_max_seconds: float | None = Field(default=None, gt=0, le=86400)
+    task_max_retries: int | None = Field(default=None, ge=0, le=20)
+    plan_approval_mode: Literal["off", "auto", "always"] | None = None
+    plan_approval_task_threshold: int | None = Field(default=None, ge=3, le=100)
+    plan_approval_token_threshold: int | None = Field(default=None, ge=1000)
+    plan_approval_cost_threshold_usd: float | None = Field(default=None, ge=0)
     langsmith_tracing: bool | None = None
     langsmith_api_key: SecretStr | None = None
     clear_langsmith_api_key: bool = False
@@ -160,6 +225,11 @@ class ResearchResponse(BaseModel):
     tool_calls: list[ToolCallView] = Field(default_factory=list)
     evidences: list[EvidenceView] = Field(default_factory=list)
     reasoning_steps: list[ReasoningStepView] = Field(default_factory=list)
+    context_compressions: list[ContextCompressionRecord] = Field(default_factory=list)
+    lead_decision: LeadDecision | None = None
+    plan_estimate: PlanEstimate | None = None
+    budget: BudgetSnapshot | None = None
+    metrics: ResearchQualityMetrics | None = None
 
 
 class ReasoningStepView(BaseModel):
@@ -399,14 +469,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     or thread_id
                 )
                 user_message = request.user_goal
-                effective_goal = (
-                    _follow_up_goal(
+                follow_up_context = (
+                    _follow_up_context(
                         parent_state,
                         user_message,
                         active_settings.max_agent_context_chars,
+                        compressor=_context_compressor(active_settings),
                     )
                     if parent_state is not None
-                    else user_message
+                    else None
+                )
+                effective_goal = (
+                    follow_up_context.text if follow_up_context is not None else user_message
+                )
+                initial_context_compressions = (
+                    (follow_up_context.record,)
+                    if follow_up_context is not None and follow_up_context.record is not None
+                    else ()
                 )
                 with checkpoint_manager.open() as checkpointer:
                     return run_agent_workflow(
@@ -419,6 +498,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         user_message=user_message,
                         parent_run_id=request.parent_thread_id,
                         selected_model=selected_model,
+                        initial_context_compressions=initial_context_compressions,
                         resume=request.resume,
                         human_feedback=request.human_feedback,
                         interrupt_after=(
@@ -473,6 +553,11 @@ def _runtime_config_response(settings: Settings) -> RuntimeConfigResponse:
         large_model=settings.large_model,
         available_models=available_models,
         structured_output_method=settings.structured_output_method,
+        max_agent_context_chars=settings.max_agent_context_chars,
+        context_soft_watermark=settings.context_soft_watermark,
+        context_hard_watermark=settings.context_hard_watermark,
+        context_tool_result_max_chars=settings.context_tool_result_max_chars,
+        context_summary_max_chars=settings.context_summary_max_chars,
         openai_configured=bool(
             settings.openai_api_key and settings.small_model and settings.large_model
         ),
@@ -487,6 +572,30 @@ def _runtime_config_response(settings: Settings) -> RuntimeConfigResponse:
         research_min_unique_sources=settings.research_min_unique_sources,
         research_min_independent_domains=settings.research_min_independent_domains,
         dynamic_model_routing=settings.dynamic_model_routing,
+        max_concurrent_workers=settings.max_concurrent_workers,
+        max_total_tasks=settings.max_total_tasks,
+        max_total_searches=settings.max_total_searches,
+        max_total_input_tokens=settings.max_total_input_tokens,
+        max_total_output_tokens=settings.max_total_output_tokens,
+        max_total_cost_usd=settings.max_total_cost_usd,
+        max_run_seconds=settings.max_run_seconds,
+        max_conflict_tasks=settings.max_conflict_tasks,
+        small_input_cost_per_million=settings.small_input_cost_per_million,
+        small_output_cost_per_million=settings.small_output_cost_per_million,
+        large_input_cost_per_million=settings.large_input_cost_per_million,
+        large_output_cost_per_million=settings.large_output_cost_per_million,
+        task_max_searches=settings.task_max_searches,
+        task_max_sources=settings.task_max_sources,
+        task_max_input_tokens=settings.task_max_input_tokens,
+        task_max_output_tokens=settings.task_max_output_tokens,
+        task_max_seconds=settings.task_max_seconds,
+        task_max_retries=settings.task_max_retries,
+        plan_approval_mode=settings.plan_approval_mode,
+        plan_approval_task_threshold=settings.plan_approval_task_threshold,
+        plan_approval_token_threshold=settings.plan_approval_token_threshold,
+        plan_approval_cost_threshold_usd=(
+            settings.plan_approval_cost_threshold_usd
+        ),
         langsmith_tracing=settings.langsmith_tracing,
         langsmith_configured=bool(settings.langsmith_api_key),
         langsmith_project=settings.langsmith_project,
@@ -509,6 +618,18 @@ def _research_response(
         not in {WorkflowStatus.FAILED, WorkflowStatus.WAITING_HUMAN}
     )
     paused = can_resume and not execution_active
+    compression_events = {
+        event.event_id: event for event in state.get("context_compressions", [])
+    }
+    if runtime is not None:
+        compression_events.update(
+            {
+                event.event_id: event
+                for event in runtime.context_compressor.snapshot(
+                    context_prefix=f"{run_id}:"
+                )
+            }
+        )
     return ResearchResponse(
         status=WorkflowStatus.PAUSED if paused else persisted_status,
         thread_id=run_id,
@@ -526,7 +647,32 @@ def _research_response(
         tool_calls=[_tool_call_view(record) for record in tool_records],
         evidences=[_evidence_view(record) for record in evidence_records],
         reasoning_steps=_reasoning_step_views(state, runtime),
+        context_compressions=sorted(
+            compression_events.values(), key=lambda event: event.created_at
+        ),
+        lead_decision=state.get("lead_decision"),
+        plan_estimate=state.get("plan_estimate"),
+        budget=(runtime.budget_ledger.snapshot(run_id) if runtime else None),
+        metrics=(
+            evaluate_research_quality(
+                state,
+                _run_payloads(state, runtime),
+                evidence_records,
+            )
+            if runtime
+            else None
+        ),
     )
+
+
+def _run_payloads(state: dict[str, Any], runtime: AgentRuntime) -> list[Any]:
+    payloads: list[Any] = []
+    for reference in state.get("intermediate_results", {}).values():
+        try:
+            payloads.append(runtime.blackboard.get_by_uri(reference.payload_ref).payload)
+        except KeyError:
+            continue
+    return payloads
 
 
 def _follow_up_goal(
@@ -536,20 +682,133 @@ def _follow_up_goal(
 ) -> str | None:
     """Build bounded context for a new workflow turn linked to a completed turn."""
 
+    result = _follow_up_context(parent_state, user_message, max_context_chars)
+    return result.text if result is not None else user_message
+
+
+def _follow_up_context(
+    parent_state: dict[str, Any] | None,
+    user_message: str | None,
+    max_context_chars: int,
+    *,
+    compressor: ContextCompressor | None = None,
+) -> CompressionResult | None:
+    """Build a reproducible, watermark-compressed context for a linked turn."""
+
     if parent_state is None or user_message is None:
-        return user_message
-    previous_message = parent_state.get("user_message", parent_state.get("user_goal", ""))
-    previous_report = str(parent_state.get("final_report") or "")
-    fixed = (
-        "这是同一研究会话的后续问题。请结合上一轮结论回答当前问题；"
-        "若当前要求与上一轮冲突，以当前要求为准。\n\n"
-        f"上一轮用户问题：\n{previous_message}\n\n"
-        "上一轮研究结论：\n"
+        return None
+    previous_message = str(
+        parent_state.get("user_message", parent_state.get("user_goal", ""))
     )
-    suffix = f"\n\n当前用户问题：\n{user_message}"
-    report_budget = max(1000, max_context_chars - len(fixed) - len(suffix))
-    bounded_report = previous_report[:report_budget]
-    return f"{fixed}{bounded_report}{suffix}"
+    previous_report = str(parent_state.get("final_report") or "")
+    parent_run_id = str(parent_state.get("run_id") or "unknown")
+    checkpoint_ref = f"checkpoint://thread/{parent_run_id}/final_report"
+    exact_references = [checkpoint_ref]
+    exact_references.extend(
+        str(reference.payload_ref)
+        for reference in parent_state.get("intermediate_results", {}).values()
+    )
+    constraints = _parent_constraints(parent_state)
+    validation = _parent_validation(parent_state)
+    items = (
+        ContextItem(
+            item_id="previous-user-message",
+            kind="old_turn",
+            content=previous_message,
+            summary=previous_message,
+            segment="previous-turn",
+            priority=90,
+        ),
+        ContextItem(
+            item_id="previous-final-report",
+            kind="regenerable",
+            content=previous_report,
+            summary=_compact_report_summary(previous_report),
+            reference=checkpoint_ref,
+            version=parent_run_id,
+            replay_hint=f"GET /research/{parent_run_id}",
+            segment="previous-turn",
+            priority=85,
+        ),
+        ContextItem(
+            item_id="current-user-message",
+            kind="active",
+            content=user_message,
+            summary=user_message,
+            segment="current-turn",
+            required=True,
+            priority=100,
+        ),
+    )
+    snapshot = ContextSnapshot(
+        goal=user_message,
+        constraints=tuple(
+            (
+                "这是同一研究会话的后续问题；冲突时以当前要求为准。",
+                *constraints,
+            )
+        ),
+        decisions=(
+            f"上一轮用户问题：{previous_message}",
+            _compact_report_summary(previous_report),
+        ),
+        pending_items=(f"回答当前追问：{user_message}",),
+        exact_references=tuple(dict.fromkeys(exact_references)),
+        validation_results=validation,
+        next_action=(
+            "结合上一轮已验证结论回答当前问题，不重复已完成的研究。\n"
+            f"当前用户问题：{user_message}"
+        ),
+    )
+    active_compressor = compressor or ContextCompressor(max_chars=max_context_chars)
+    return active_compressor.compress(
+        items,
+        context_id=f"{parent_run_id}:follow_up",
+        snapshot=snapshot,
+        max_chars=max_context_chars,
+        boundary="conversation_turn",
+    )
+
+
+def _context_compressor(settings: Settings) -> ContextCompressor:
+    return ContextCompressor(
+        max_chars=settings.max_agent_context_chars,
+        soft_watermark=settings.context_soft_watermark,
+        hard_watermark=settings.context_hard_watermark,
+        tool_result_max_chars=settings.context_tool_result_max_chars,
+        summary_max_chars=settings.context_summary_max_chars,
+        max_events=settings.context_compression_max_events,
+    )
+
+
+def _compact_report_summary(report: str, max_chars: int = 1200) -> str:
+    normalized = "\n".join(line.strip() for line in report.splitlines() if line.strip())
+    if len(normalized) <= max_chars:
+        return normalized
+    marker = "\n…[previous report summarized]…\n"
+    remaining = max_chars - len(marker)
+    return f"{normalized[: int(remaining * 0.75)]}{marker}{normalized[-int(remaining * 0.25):]}"
+
+
+def _parent_constraints(parent_state: dict[str, Any]) -> tuple[str, ...]:
+    requirement = parent_state.get("requirements")
+    if requirement is None:
+        return ()
+    if isinstance(requirement, dict):
+        return tuple(str(value) for value in requirement.get("constraints", ()))
+    return tuple(str(value) for value in getattr(requirement, "constraints", ()))
+
+
+def _parent_validation(parent_state: dict[str, Any]) -> tuple[str, ...]:
+    results = []
+    for task in parent_state.get("tasks", []):
+        task_id = getattr(task, "task_id", None) or task.get("task_id", "unknown")
+        status = getattr(task, "status", None) or task.get("status", "unknown")
+        score = getattr(task, "quality_score", None)
+        if score is None and isinstance(task, dict):
+            score = task.get("quality_score")
+        results.append(f"{task_id}: status={status}, quality_score={score}")
+    return tuple(results)
 
 
 def _reasoning_step_views(

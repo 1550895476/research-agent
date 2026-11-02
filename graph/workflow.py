@@ -10,6 +10,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 from pydantic import BaseModel, ConfigDict, Field
 
+from core.budget import BudgetExceeded
+from core.context_compression import ContextCompressionRecord
 from core.recovery import RecoveryAction, RecoveryPolicy
 from graph.state import (
     AgentName,
@@ -54,6 +56,7 @@ class TaskExecutionResult(BaseModel):
     quality_complete: bool | None = None
     search_count: int = Field(default=0, ge=0)
     quality_gaps: tuple[str, ...] = ()
+    context_compressions: tuple[ContextCompressionRecord, ...] = ()
 
 
 TaskExecutor = Callable[[TaskExecutionRequest], TaskExecutionResult]
@@ -295,6 +298,7 @@ def make_worker_node(
                         time.sleep(decision.retry_delay_seconds)
                     continue
                 if decision.action == RecoveryAction.REPLAN:
+                    compression_events = _failure_compression_events(exc)
                     request_to_replan = ReplanRequest(
                         task_id=task_id,
                         reason=decision.reason,
@@ -306,6 +310,7 @@ def make_worker_node(
                             )
                         ],
                         "replan_requests": [request_to_replan],
+                        "context_compressions": list(compression_events),
                         "status_events": [
                             WorkerStatusEvent(
                                 task_id=task_id,
@@ -324,6 +329,10 @@ def make_worker_node(
                             )
                         ],
                         "checkpoints": [
+                            *_hard_compression_checkpoints(
+                                compression_events,
+                                task_id,
+                            ),
                             CheckpointReference(
                                 stage="task_replan_requested",
                                 task_ids=(task_id,),
@@ -331,6 +340,7 @@ def make_worker_node(
                         ],
                     }
                 if decision.action == RecoveryAction.HUMAN:
+                    compression_events = _failure_compression_events(exc)
                     human_request = HumanRequest(
                         task_id=task_id,
                         reason=decision.reason,
@@ -346,6 +356,7 @@ def make_worker_node(
                             )
                         ],
                         "human_requests": [human_request],
+                        "context_compressions": list(compression_events),
                         "status_events": [
                             WorkerStatusEvent(
                                 task_id=task_id,
@@ -363,6 +374,10 @@ def make_worker_node(
                             )
                         ],
                         "checkpoints": [
+                            *_hard_compression_checkpoints(
+                                compression_events,
+                                task_id,
+                            ),
                             CheckpointReference(
                                 stage="waiting_human",
                                 task_ids=(task_id,),
@@ -372,11 +387,13 @@ def make_worker_node(
                 break
         if result is None:
             assert last_error is not None and last_decision is not None
+            compression_events = _failure_compression_events(last_error)
             failed_task = task.model_copy(
                 update={"status": TaskStatus.FAILED, "error": str(last_error)}
             )
             return {
                 "tasks": [failed_task],
+                "context_compressions": list(compression_events),
                 "status_events": [
                     WorkerStatusEvent(
                         task_id=task_id,
@@ -391,10 +408,14 @@ def make_worker_node(
                         message=last_decision.reason,
                         stage=agent.value,
                         task_id=task_id,
-                        retryable=True,
+                        retryable=not isinstance(last_error, BudgetExceeded),
                     )
                 ],
                 "checkpoints": [
+                    *_hard_compression_checkpoints(
+                        compression_events,
+                        task_id,
+                    ),
                     CheckpointReference(stage="task_failed", task_ids=(task_id,))
                 ],
             }
@@ -421,6 +442,7 @@ def make_worker_node(
         return {
             "tasks": [completed_task],
             "intermediate_results": {result.result_id: result_ref},
+            "context_compressions": list(result.context_compressions),
             "status_events": [
                 WorkerStatusEvent(
                     task_id=task_id,
@@ -429,12 +451,48 @@ def make_worker_node(
                 )
             ],
             "checkpoints": [
-                CheckpointReference(stage="task_completed", task_ids=(task_id,))
+                *(
+                    [
+                        CheckpointReference(
+                            stage="context_hard_compressed",
+                            task_ids=(task_id,),
+                        )
+                    ]
+                    if any(
+                        event.checkpoint_required
+                        for event in result.context_compressions
+                    )
+                    else []
+                ),
+                CheckpointReference(stage="task_completed", task_ids=(task_id,)),
             ],
         }
 
     worker.__name__ = "worker_node"
     return worker
+
+
+def _failure_compression_events(
+    error: Exception,
+) -> tuple[ContextCompressionRecord, ...]:
+    events = getattr(error, "context_compressions", ())
+    return tuple(
+        event for event in events if isinstance(event, ContextCompressionRecord)
+    )
+
+
+def _hard_compression_checkpoints(
+    events: tuple[ContextCompressionRecord, ...],
+    task_id: str,
+) -> list[CheckpointReference]:
+    if not any(event.checkpoint_required for event in events):
+        return []
+    return [
+        CheckpointReference(
+            stage="context_hard_compressed",
+            task_ids=(task_id,),
+        )
+    ]
 
 
 def _normalize_interrupt_nodes(nodes: list[str] | None) -> list[str] | None:

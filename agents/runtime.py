@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from threading import BoundedSemaphore, RLock
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -10,8 +11,9 @@ from uuid import uuid4
 import psycopg
 from pydantic import BaseModel
 
+from agents.lead import LeadRouter
 from agents.model import ModelFactory, ModelTier, StructuredModel
-from agents.model_router import DynamicModelRouter
+from agents.model_router import DynamicModelRouter, MeteredStructuredModel, RoutedTier
 from agents.planner import PlannerAgent
 from agents.requirement_parser import RequirementParserAgent
 from agents.researcher import ResearcherAgent, ResearchOutput, ResearchSource
@@ -19,7 +21,9 @@ from agents.supervisor import SupervisorAgent
 from agents.tool_selector import LLMToolSelector, PlannedToolCall, ToolCallPlan, ToolSelector
 from agents.verifier import TaskQualityAssessment, VerifierAgent
 from agents.writer import ReportDraft, ReportWriterAgent
+from core.budget import BudgetExceeded, BudgetLedger, RunBudget, TaskBudget
 from core.config import Settings, get_settings
+from core.context_compression import ContextCompressionRecord, ContextCompressor
 from core.observability import AgentObservability, create_observability, observation_scope
 from core.recovery import EmptyRetrievalError, RecoveryPolicy, ToolExecutionError
 from core.saga import SagaCoordinator, SagaStep, create_saga_coordinator
@@ -31,6 +35,7 @@ from graph.state import (
     CheckpointReference,
     HumanFeedback,
     HumanRequest,
+    LeadDecision,
     ResearchTask,
     TaskDAG,
     TaskStatus,
@@ -86,6 +91,7 @@ class AgentRuntime:
         saga_coordinator: SagaCoordinator | None = None,
         model_router: StructuredModel | None = None,
         observability: AgentObservability | None = None,
+        context_compressor: ContextCompressor | None = None,
         max_context_chars: int = 16000,
         require_external_evidence: bool = False,
         max_research_tool_rounds: int = 3,
@@ -96,6 +102,10 @@ class AgentRuntime:
         research_completion_score: int = 80,
         research_min_unique_sources: int = 5,
         research_min_independent_domains: int = 3,
+        budget_ledger: BudgetLedger | None = None,
+        run_budget: RunBudget | None = None,
+        default_task_budget: TaskBudget | None = None,
+        lead_router: LeadRouter | None = None,
     ) -> None:
         self.blackboard = blackboard or InMemoryBlackboard()
         self.long_term_memory = long_term_memory or InMemoryLongTermMemory()
@@ -108,6 +118,15 @@ class AgentRuntime:
         self.recovery_policy = recovery_policy or RecoveryPolicy.disabled()
         self.saga = saga_coordinator or SagaCoordinator()
         self.observability = observability or AgentObservability()
+        self.context_compressor = context_compressor or ContextCompressor(
+            max_chars=max_context_chars
+        )
+        self.run_budget = run_budget or RunBudget()
+        self.default_task_budget = default_task_budget or TaskBudget()
+        self.budget_ledger = budget_ledger or BudgetLedger(self.run_budget)
+        self.lead = lead_router or LeadRouter(run_budget=self.run_budget)
+        self._worker_semaphores: dict[str, BoundedSemaphore] = {}
+        self._worker_semaphore_lock = RLock()
         self._max_context_chars = max_context_chars
         self._require_external_evidence = require_external_evidence
         self._max_research_tool_rounds = max(1, max_research_tool_rounds)
@@ -130,14 +149,25 @@ class AgentRuntime:
         self.planner = PlannerAgent(
             large_agent_model,
             require_retrieval=require_external_evidence,
+            default_task_budget=self.default_task_budget,
+            max_tasks=self.run_budget.max_tasks,
         )
         self.supervisor = SupervisorAgent()
         self.researcher = ResearcherAgent(
             large_agent_model,
             max_context_chars=max_context_chars,
+            context_compressor=self.context_compressor,
         )
-        self.verifier = VerifierAgent(large_agent_model, max_context_chars=max_context_chars)
-        self.writer = ReportWriterAgent(large_agent_model, max_context_chars=max_context_chars)
+        self.verifier = VerifierAgent(
+            large_agent_model,
+            max_context_chars=max_context_chars,
+            context_compressor=self.context_compressor,
+        )
+        self.writer = ReportWriterAgent(
+            large_agent_model,
+            max_context_chars=max_context_chars,
+            context_compressor=self.context_compressor,
+        )
 
     @classmethod
     def from_settings(
@@ -155,16 +185,61 @@ class AgentRuntime:
         small_model = factory.create(ModelTier.SMALL)
         large_model = factory.create(ModelTier.LARGE)
         observability = create_observability(runtime_settings)
+        run_budget = RunBudget(
+            max_concurrent_workers=runtime_settings.max_concurrent_workers,
+            max_tasks=runtime_settings.max_total_tasks,
+            max_searches=runtime_settings.max_total_searches,
+            max_input_tokens=runtime_settings.max_total_input_tokens,
+            max_output_tokens=runtime_settings.max_total_output_tokens,
+            max_cost_usd=runtime_settings.max_total_cost_usd,
+            max_seconds=runtime_settings.max_run_seconds,
+            max_conflict_tasks=runtime_settings.max_conflict_tasks,
+            small_input_cost_per_million=(
+                runtime_settings.small_input_cost_per_million
+            ),
+            small_output_cost_per_million=(
+                runtime_settings.small_output_cost_per_million
+            ),
+            large_input_cost_per_million=(
+                runtime_settings.large_input_cost_per_million
+            ),
+            large_output_cost_per_million=(
+                runtime_settings.large_output_cost_per_million
+            ),
+        )
+        default_task_budget = TaskBudget(
+            max_searches=runtime_settings.task_max_searches,
+            max_sources=runtime_settings.task_max_sources,
+            max_input_tokens=runtime_settings.task_max_input_tokens,
+            max_output_tokens=runtime_settings.task_max_output_tokens,
+            max_seconds=runtime_settings.task_max_seconds,
+            max_retries=runtime_settings.task_max_retries,
+        )
+        budget_ledger = BudgetLedger(run_budget)
         model_router = (
             DynamicModelRouter(
                 small_model,
                 large_model,
                 observability=observability,
+                budget_ledger=budget_ledger,
                 complexity_chars=runtime_settings.model_router_complexity_chars,
             )
             if runtime_settings.dynamic_model_routing
             else None
         )
+        if model_router is None:
+            small_model = MeteredStructuredModel(
+                small_model,
+                tier=RoutedTier.SMALL,
+                observability=observability,
+                budget_ledger=budget_ledger,
+            )
+            large_model = MeteredStructuredModel(
+                large_model,
+                tier=RoutedTier.LARGE,
+                observability=observability,
+                budget_ledger=budget_ledger,
+            )
         rewrite_model = model_router or small_model
         rag_pipeline = (
             create_rag_pipeline(runtime_settings, rewrite_model=rewrite_model)
@@ -201,6 +276,16 @@ class AgentRuntime:
             saga_coordinator=create_saga_coordinator(runtime_settings),
             model_router=model_router,
             observability=observability,
+            context_compressor=ContextCompressor(
+                max_chars=runtime_settings.max_agent_context_chars,
+                soft_watermark=runtime_settings.context_soft_watermark,
+                hard_watermark=runtime_settings.context_hard_watermark,
+                tool_result_max_chars=(
+                    runtime_settings.context_tool_result_max_chars
+                ),
+                summary_max_chars=runtime_settings.context_summary_max_chars,
+                max_events=runtime_settings.context_compression_max_events,
+            ),
             max_context_chars=runtime_settings.max_agent_context_chars,
             require_external_evidence=runtime_settings.require_external_evidence,
             max_research_tool_rounds=runtime_settings.research_max_tool_rounds,
@@ -215,13 +300,35 @@ class AgentRuntime:
             research_min_independent_domains=(
                 runtime_settings.research_min_independent_domains
             ),
+            budget_ledger=budget_ledger,
+            run_budget=run_budget,
+            default_task_budget=default_task_budget,
+            lead_router=LeadRouter(
+                run_budget=run_budget,
+                approval_mode=runtime_settings.plan_approval_mode,
+                approval_task_threshold=(
+                    runtime_settings.plan_approval_task_threshold
+                ),
+                approval_token_threshold=(
+                    runtime_settings.plan_approval_token_threshold
+                ),
+                approval_cost_threshold_usd=(
+                    runtime_settings.plan_approval_cost_threshold_usd
+                ),
+            ),
         )
 
     def requirement_parser_node(self, state: AgentState) -> dict[str, Any]:
         """LangGraph adapter for RequirementParserAgent.parse."""
 
+        self.budget_ledger.start_run(state["run_id"], self.run_budget)
         try:
-            requirements = self.requirement_parser.parse(state["user_goal"])
+            with observation_scope(
+                run_id=state["run_id"],
+                user_id=state["user_id"],
+                agent="requirement_parser",
+            ):
+                requirements = self.requirement_parser.parse(state["user_goal"])
         except Exception as exc:
             self._record_episode(
                 state,
@@ -250,6 +357,10 @@ class AgentRuntime:
         if state["tasks"]:
             tasks = state["tasks"]
             TaskDAG(tasks)
+            requirements = state.get("requirements")
+            if requirements is None:
+                raise ValueError("Planner requires parsed research requirements")
+            lead_decision = self.lead.decide(requirements)
         else:
             requirements = state.get("requirements")
             if requirements is None:
@@ -269,8 +380,18 @@ class AgentRuntime:
                     if event.failure_reason
                 ]
             )
+            lead_decision = self.lead.decide(requirements)
             try:
-                tasks = self.planner.plan(requirements, memory_context=memory_context)
+                with observation_scope(
+                    run_id=state["run_id"],
+                    user_id=state["user_id"],
+                    agent="planner",
+                ):
+                    tasks = self.planner.plan(
+                        requirements,
+                        memory_context=memory_context,
+                        max_research_workers=lead_decision.recommended_workers,
+                    )
             except Exception as exc:
                 self._record_episode(
                     state,
@@ -280,6 +401,17 @@ class AgentRuntime:
                     payload={"memory_count": len(memory_context)},
                 )
                 raise
+        self.budget_ledger.register_plan(
+            state["run_id"],
+            len(tasks),
+            {task.task_id: task.budget for task in tasks},
+        )
+        plan_estimate = self.lead.estimate(tasks)
+        lead_decision = self.lead.with_approval(
+            lead_decision,
+            run_id=state["run_id"],
+            required=self.lead.approval_required(plan_estimate),
+        )
         self._record_episode(
             state,
             EpisodeType.PLAN_CREATED,
@@ -294,6 +426,8 @@ class AgentRuntime:
         )
         return {
             "tasks": tasks,
+            "lead_decision": lead_decision,
+            "plan_estimate": plan_estimate,
             "workflow_status": WorkflowStatus.RUNNING,
             "next_agent": "supervisor",
             "checkpoints": [
@@ -307,6 +441,32 @@ class AgentRuntime:
     def supervisor_node(self, state: AgentState) -> dict[str, Any]:
         """Translate a deterministic Supervisor decision into graph state updates."""
 
+        lead_decision = state.get("lead_decision")
+        if (
+            isinstance(lead_decision, LeadDecision)
+            and lead_decision.requires_approval
+            and lead_decision.approval_token not in state["approvals"]
+        ):
+            estimate = state.get("plan_estimate")
+            reason = "该研究计划超过自动执行阈值，需要确认后再启动 Worker"
+            if estimate is not None:
+                reason += (
+                    f"（{estimate.task_count} 个任务，预计 "
+                    f"{estimate.estimated_input_tokens + estimate.estimated_output_tokens} "
+                    "tokens）"
+                )
+            return {
+                "workflow_status": WorkflowStatus.WAITING_HUMAN,
+                "human_requests": [
+                    HumanRequest(
+                        task_id="plan",
+                        reason=reason,
+                        approval_token=lead_decision.approval_token,
+                    )
+                ],
+                "next_agent": "human_intervention",
+                "dispatched_task_ids": [],
+            }
         if any(task.status == TaskStatus.WAITING_HUMAN for task in state["tasks"]):
             return {
                 "workflow_status": WorkflowStatus.WAITING_HUMAN,
@@ -326,18 +486,23 @@ class AgentRuntime:
             revised_tasks = []
             handled_ids = set()
             try:
-                for request in unhandled_replans:
-                    revised = self.planner.replan_task(
-                        requirements,
-                        dag.get(request.task_id),
-                        request.reason,
-                    )
-                    revised_tasks.append(revised)
-                    if self.tool_runtime is not None:
-                        self.tool_runtime.guardrail.reset_task_usage(
-                            state["run_id"], request.task_id
+                with observation_scope(
+                    run_id=state["run_id"],
+                    user_id=state["user_id"],
+                    agent="planner",
+                ):
+                    for request in unhandled_replans:
+                        revised = self.planner.replan_task(
+                            requirements,
+                            dag.get(request.task_id),
+                            request.reason,
                         )
-                    handled_ids.add(request.request_id)
+                        revised_tasks.append(revised)
+                        if self.tool_runtime is not None:
+                            self.tool_runtime.guardrail.reset_task_usage(
+                                state["run_id"], request.task_id
+                            )
+                        handled_ids.add(request.request_id)
             except Exception as exc:
                 task_id = unhandled_replans[0].task_id
                 return {
@@ -479,23 +644,43 @@ class AgentRuntime:
         executor: TaskExecutor,
     ) -> TaskExecutor:
         def observed(request: TaskExecutionRequest) -> TaskExecutionResult:
-            with observation_scope(
-                run_id=request.run_id,
-                user_id=request.user_id,
-                task_id=request.task.task_id,
-                agent=agent.value,
-            ):
-                with self.observability.span(
-                    f"agent.{agent.value}",
-                    kind="agent",
-                    metadata={"attempt": request.task.attempts},
-                ) as span:
-                    result = executor(request)
-                    span.metadata["result_id"] = result.result_id
-                    span.metadata["evidence_count"] = len(result.evidence_ids)
-                    return result
+            semaphore = self._worker_semaphore(request.run_id)
+            semaphore.acquire()
+            started = False
+            try:
+                self.budget_ledger.start_worker(request.run_id, request.task.task_id)
+                started = True
+                with observation_scope(
+                    run_id=request.run_id,
+                    user_id=request.user_id,
+                    task_id=request.task.task_id,
+                    agent=agent.value,
+                ):
+                    with self.observability.span(
+                        f"agent.{agent.value}",
+                        kind="agent",
+                        metadata={"attempt": request.task.attempts},
+                    ) as span:
+                        result = executor(request)
+                        span.metadata["result_id"] = result.result_id
+                        span.metadata["evidence_count"] = len(result.evidence_ids)
+                        return result
+            finally:
+                if started:
+                    self.budget_ledger.finish_worker(
+                        request.run_id,
+                        request.task.task_id,
+                    )
+                semaphore.release()
 
         return observed
+
+    def _worker_semaphore(self, run_id: str) -> BoundedSemaphore:
+        with self._worker_semaphore_lock:
+            return self._worker_semaphores.setdefault(
+                run_id,
+                BoundedSemaphore(self.run_budget.max_concurrent_workers),
+            )
 
     def finalize_node(self, state: AgentState) -> dict[str, Any]:
         """Resolve the Writer's Blackboard payload into the final graph output."""
@@ -546,6 +731,7 @@ class AgentRuntime:
                         decision="report_persisted",
                         payload={"result_id": result_id},
                     )
+                    self.budget_ledger.complete_run(state["run_id"])
                     return {
                         "final_report": payload.markdown_report,
                         "current_task": None,
@@ -557,6 +743,7 @@ class AgentRuntime:
 
     def _research_executor(self, role: AgentName) -> TaskExecutor:
         def execute(request: TaskExecutionRequest) -> TaskExecutionResult:
+            context_prefix = f"{request.run_id}:{request.task.task_id}:"
             try:
                 dependency_payloads = self.blackboard.payloads_for_tasks(
                     request.task.dependencies
@@ -594,6 +781,7 @@ class AgentRuntime:
                     request.user_goal,
                     request.task,
                     dependency_payloads,
+                    context_id=f"{context_prefix}researcher:initial",
                 )
                 if role == AgentName.RESEARCHER and self._research_quality_gate_enabled:
                     payload, tool_results = self._run_research_quality_gate(
@@ -622,7 +810,7 @@ class AgentRuntime:
                                 request,
                                 query,
                             )
-                        except ToolQuotaExceeded:
+                        except (BudgetExceeded, ToolQuotaExceeded):
                             break
                         if not followup_results or not any(
                             result.evidences for result in followup_results
@@ -634,6 +822,7 @@ class AgentRuntime:
                             request.user_goal,
                             request.task,
                             [payload, *dependency_payloads],
+                            context_id=f"{context_prefix}researcher:followup",
                         )
                 if rag_context is not None:
                     payload = payload.model_copy(
@@ -696,6 +885,10 @@ class AgentRuntime:
                         }
                     )
             except Exception as exc:
+                _attach_context_compressions(
+                    exc,
+                    self.context_compressor.snapshot(context_prefix=context_prefix),
+                )
                 self._record_request_failure(request, role.value, exc)
                 raise
             evidence_ids = tuple(
@@ -708,7 +901,14 @@ class AgentRuntime:
                     + [source.evidence_id for source in payload.sources]
                 )
             )
-            result = self._store_result(request.task, payload, evidence_ids)
+            result = self._store_result(
+                request.task,
+                payload,
+                evidence_ids,
+                context_compressions=self.context_compressor.snapshot(
+                    context_prefix=context_prefix
+                ),
+            )
             self._record_request_success(request, role.value, result.result_id)
             return result
 
@@ -734,6 +934,9 @@ class AgentRuntime:
                 request.task,
                 payload,
                 tool_results,
+                context_id=(
+                    f"{request.run_id}:{request.task.task_id}:quality_gate:{round_index}"
+                ),
             )
             passed = self._task_quality_passed(request.task, assessment, tool_results)
             if passed:
@@ -773,6 +976,9 @@ class AgentRuntime:
                 request.user_goal,
                 request.task,
                 [payload, *dependency_payloads],
+                context_id=(
+                    f"{request.run_id}:{request.task.task_id}:researcher:quality_followup"
+                ),
             )
 
         if assessment is None:
@@ -976,7 +1182,14 @@ class AgentRuntime:
             return tuple(
                 spec
                 for spec in specs
-                if {"search", "database"}.intersection(spec.capabilities)
+                if _is_read_only_tool(spec)
+                and {
+                    "search",
+                    "read",
+                    "knowledge_base",
+                    "database",
+                    "retrieval",
+                }.intersection(spec.capabilities)
             )
         capability = {
             AgentName.RETRIEVER: "search",
@@ -984,7 +1197,11 @@ class AgentRuntime:
         }.get(role)
         if capability is None:
             return ()
-        return tuple(spec for spec in specs if capability in spec.capabilities)
+        return tuple(
+            spec
+            for spec in specs
+            if capability in spec.capabilities and _is_read_only_tool(spec)
+        )
 
     def _execute_followup_search(
         self,
@@ -1033,6 +1250,7 @@ class AgentRuntime:
     ) -> list[ToolResult]:
         if self.tool_runtime is None:
             return []
+        allowed_specs = {spec.name: spec for spec in self._tool_specs_for_role(role)}
         context = ToolContext(
             run_id=request.run_id,
             user_id=request.user_id,
@@ -1042,9 +1260,30 @@ class AgentRuntime:
         )
         results = []
         for call in plan.calls:
+            if call.tool_name not in allowed_specs:
+                raise ToolExecutionError(
+                    f"role {role.value} is not allowed to execute tool {call.tool_name}"
+                )
             arguments = dict(call.arguments)
             if call.tool_name == "web.search":
-                arguments["max_results"] = max(5, int(arguments.get("max_results", 5)))
+                remaining_sources = self.budget_ledger.remaining_sources(
+                    request.run_id,
+                    request.task.task_id,
+                )
+                if remaining_sources <= 0:
+                    break
+                self.budget_ledger.reserve_search(
+                    request.run_id,
+                    request.task.task_id,
+                    request.task.budget,
+                )
+                arguments["max_results"] = max(
+                    1,
+                    min(
+                        int(arguments.get("max_results", 5)),
+                        remaining_sources,
+                    ),
+                )
             call_id = self.evidence_store.start_tool_call(
                 run_id=request.run_id,
                 user_id=request.user_id,
@@ -1085,6 +1324,12 @@ class AgentRuntime:
                 )
                 span.metadata["is_error"] = result.is_error
                 span.metadata["evidence_count"] = len(result.evidences)
+                self.budget_ledger.record_sources(
+                    request.run_id,
+                    request.task.task_id,
+                    tuple(evidence.source_uri for evidence in result.evidences),
+                    request.task.budget,
+                )
                 results.append(result)
         return results
 
@@ -1118,19 +1363,34 @@ class AgentRuntime:
         if unknown:
             raise ValueError(f"feedback references unknown task ids: {sorted(unknown)}")
         if change_parts and not direct_ids:
-            direct_ids = set(
-                self.planner.analyze_impact(
-                    updated_requirements,
-                    state["tasks"],
-                    "\n".join(change_parts),
+            with observation_scope(
+                run_id=state["run_id"],
+                user_id=state["user_id"],
+                agent="planner",
+            ):
+                direct_ids = set(
+                    self.planner.analyze_impact(
+                        updated_requirements,
+                        state["tasks"],
+                        "\n".join(change_parts),
+                    )
                 )
-            )
         affected_ids = _downstream_closure(state["tasks"], direct_ids)
         task_updates = []
         reason = "\n".join(change_parts) or "human approval received"
         for task in state["tasks"]:
             if task.task_id in affected_ids:
-                revised = self.planner.replan_task(updated_requirements, task, reason)
+                with observation_scope(
+                    run_id=state["run_id"],
+                    user_id=state["user_id"],
+                    task_id=task.task_id,
+                    agent="planner",
+                ):
+                    revised = self.planner.replan_task(
+                        updated_requirements,
+                        task,
+                        reason,
+                    )
                 task_updates.append(
                     revised.model_copy(
                         update={
@@ -1182,10 +1442,43 @@ class AgentRuntime:
         }
 
     def _verifier_executor(self, request: TaskExecutionRequest) -> TaskExecutionResult:
+        context_prefix = f"{request.run_id}:{request.task.task_id}:"
         try:
             payloads = self.blackboard.payloads_for_tasks(request.task.dependencies)
-            payload = self.verifier.verify(request.user_goal, request.task, payloads)
+            payload = self.verifier.verify(
+                request.user_goal,
+                request.task,
+                payloads,
+                context_id=f"{context_prefix}verifier",
+            )
+            arbitration_results: list[ToolResult] = []
+            for conflict in payload.conflicts[: self.run_budget.max_conflict_tasks]:
+                query = (
+                    f"{request.user_goal} {request.task.title} 冲突核查：{conflict} "
+                    "原始定义 测试条件 版本 日期 一手来源"
+                )[:1000]
+                with self.observability.span(
+                    "agent.conflict_resolver",
+                    kind="agent",
+                    metadata={"conflict": conflict[:300]},
+                ) as span:
+                    results = self._execute_followup_search(request, query)
+                    span.metadata["evidence_count"] = sum(
+                        len(result.evidences) for result in results
+                    )
+                arbitration_results.extend(results)
+            if arbitration_results:
+                payload = self.verifier.verify(
+                    request.user_goal,
+                    request.task,
+                    [*payloads, *arbitration_results],
+                    context_id=f"{context_prefix}verifier:arbitrated",
+                )
         except Exception as exc:
+            _attach_context_compressions(
+                exc,
+                self.context_compressor.snapshot(context_prefix=context_prefix),
+            )
             self._record_request_failure(request, "verifier", exc)
             raise
         evidence_ids = tuple(
@@ -1195,11 +1488,19 @@ class AgentRuntime:
                 for evidence_id in claim.supporting_evidence_ids
             )
         )
-        result = self._store_result(request.task, payload, evidence_ids)
+        result = self._store_result(
+            request.task,
+            payload,
+            evidence_ids,
+            context_compressions=self.context_compressor.snapshot(
+                context_prefix=context_prefix
+            ),
+        )
         self._record_request_success(request, "verifier", result.result_id)
         return result
 
     def _writer_executor(self, request: TaskExecutionRequest) -> TaskExecutionResult:
+        context_prefix = f"{request.run_id}:{request.task.task_id}:"
         try:
             payloads = self.blackboard.payloads_for_tasks(request.task.dependencies)
             payload = self.writer.write(
@@ -1207,6 +1508,7 @@ class AgentRuntime:
                 request.requirements,
                 request.task,
                 payloads,
+                context_id=f"{context_prefix}writer",
             )
             if self._require_external_evidence:
                 evidence_records = self.evidence_store.list_evidences(request.run_id)
@@ -1223,6 +1525,10 @@ class AgentRuntime:
                     }
                 )
         except Exception as exc:
+            _attach_context_compressions(
+                exc,
+                self.context_compressor.snapshot(context_prefix=context_prefix),
+            )
             self._record_request_failure(request, "writer", exc)
             raise
         evidence_ids = tuple(
@@ -1232,7 +1538,14 @@ class AgentRuntime:
                 for evidence_id in section.supporting_evidence_ids
             )
         )
-        result = self._store_result(request.task, payload, evidence_ids)
+        result = self._store_result(
+            request.task,
+            payload,
+            evidence_ids,
+            context_compressions=self.context_compressor.snapshot(
+                context_prefix=context_prefix
+            ),
+        )
         self._record_request_success(request, "writer", result.result_id)
         return result
 
@@ -1298,6 +1611,8 @@ class AgentRuntime:
         task: ResearchTask,
         payload: BaseModel,
         evidence_ids: tuple[str, ...],
+        *,
+        context_compressions: tuple[ContextCompressionRecord, ...] = (),
     ) -> TaskExecutionResult:
         result_id = f"result:{task.task_id}:{uuid4().hex}"
         payload_ref = self.blackboard.put(result_id, task.task_id, payload)
@@ -1315,6 +1630,7 @@ class AgentRuntime:
             quality_complete=quality_complete,
             search_count=search_count,
             quality_gaps=quality_gaps,
+            context_compressions=context_compressions,
         )
 
 
@@ -1326,6 +1642,16 @@ def _to_research_source(evidence: ToolEvidence) -> ResearchSource:
         source_uri=evidence.source_uri,
         title=evidence.title,
     )
+
+
+def _attach_context_compressions(
+    error: Exception,
+    events: tuple[ContextCompressionRecord, ...],
+) -> None:
+    """Carry compression audit data through the worker's failure boundary."""
+
+    if events:
+        error.context_compressions = events  # type: ignore[attr-defined]
 
 
 def _merge_research_sources(
@@ -1415,6 +1741,22 @@ def _normalized_source_domains(task: ResearchTask) -> tuple[str, ...]:
     return tuple(domains)
 
 
+def _is_read_only_tool(spec: ToolSpec) -> bool:
+    """Reject mutation-capable tools even when a selector tries to request one."""
+
+    forbidden = {
+        "write",
+        "send",
+        "deploy",
+        "delete",
+        "mutate",
+        "admin",
+        "execute_code",
+    }
+    capabilities = {capability.casefold() for capability in spec.capabilities}
+    return not forbidden.intersection(capabilities)
+
+
 def _append_source_appendix(
     report: str,
     evidences: tuple[EvidenceRecord, ...],
@@ -1482,6 +1824,7 @@ def run_agent_workflow(
     user_message: str | None = None,
     parent_run_id: str | None = None,
     selected_model: str | None = None,
+    initial_context_compressions: tuple[ContextCompressionRecord, ...] = (),
     resume: bool = False,
     human_feedback: HumanFeedback | None = None,
     interrupt_before: list[str] | None = None,
@@ -1523,12 +1866,22 @@ def run_agent_workflow(
             user_message=user_message,
             parent_run_id=parent_run_id,
             selected_model=selected_model,
+            context_compressions=initial_context_compressions,
         )
     )
-    if resume and human_feedback is not None:
+    if resume:
         snapshot = graph.get_state(active_config)
         if not snapshot.values:
             raise ValueError(f"checkpoint {run_id!r} has no workflow state")
+        active_runtime.budget_ledger.start_run(run_id, active_runtime.run_budget)
+        restored_tasks = list(snapshot.values.get("tasks", []))
+        if restored_tasks:
+            active_runtime.budget_ledger.register_plan(
+                run_id,
+                len(restored_tasks),
+                {task.task_id: task.budget for task in restored_tasks},
+            )
+    if resume and human_feedback is not None:
         graph.update_state(
             active_config,
             active_runtime.apply_human_feedback(snapshot.values, human_feedback),

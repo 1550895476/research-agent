@@ -6,6 +6,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agents.model import StructuredModel
+from core.budget import TaskBudget
 from graph.state import AgentName, ResearchRequirement, ResearchTask, TaskDAG
 
 
@@ -37,6 +38,7 @@ class PlannedTask(BaseModel):
     )
     dependencies: tuple[str, ...] = ()
     assigned_agent: AgentName
+    budget: TaskBudget = Field(default_factory=TaskBudget)
 
 
 class ResearchPlan(BaseModel):
@@ -81,15 +83,25 @@ class TaskRevision(BaseModel):
 class PlannerAgent:
     """Generate and validate a dependency-aware research plan."""
 
-    def __init__(self, model: StructuredModel, *, require_retrieval: bool = False) -> None:
+    def __init__(
+        self,
+        model: StructuredModel,
+        *,
+        require_retrieval: bool = False,
+        default_task_budget: TaskBudget | None = None,
+        max_tasks: int = 12,
+    ) -> None:
         self._model = model
         self._require_retrieval = require_retrieval
+        self._default_task_budget = default_task_budget or TaskBudget()
+        self._max_tasks = max(3, min(20, max_tasks))
 
     def plan(
         self,
         requirement: ResearchRequirement,
         *,
         memory_context: tuple[str, ...] = (),
+        max_research_workers: int | None = None,
     ) -> list[ResearchTask]:
         """Return executable tasks or raise when the generated graph is invalid."""
 
@@ -114,6 +126,8 @@ class PlannerAgent:
                     "completion_criteria that a Verifier can score. Planner owns module scope and "
                     "the initial search plan; researchers execute it and may only perform "
                     "gap-filling searches within that scope. "
+                    "Every task contract must include a bounded budget for searches, sources, "
+                    "input/output tokens, elapsed seconds, and retries. "
                     "When the user restricts sources to official publishers or named websites, "
                     "populate source_domains with the relevant official hostnames for each "
                     "research task. Use hostnames only, without schemes or paths; otherwise leave "
@@ -125,6 +139,8 @@ class PlannerAgent:
                     "and permitted read-only database tools; do not create retriever or database "
                     "Agent tasks because those capabilities are tools. "
                     + evidence_requirement
+                    + f"Create no more than {self._max_tasks} total tasks and no more than "
+                    f"{max_research_workers or self._max_tasks - 2} researcher tasks. "
                     + "Include at least one verifier after the research tasks and exactly one "
                     "final writer after verification. Dependencies must reference existing "
                     "task_id values and the graph must be acyclic."
@@ -139,6 +155,11 @@ class PlannerAgent:
             ),
         ]
         draft = self._model.invoke(ResearchPlan, messages)
+        planned_tasks = _limit_planned_tasks(
+            list(draft.tasks),
+            max_tasks=self._max_tasks,
+            max_research_workers=max_research_workers or self._max_tasks - 2,
+        )
         tasks = [
             ResearchTask(
                 task_id=task.task_id,
@@ -150,8 +171,9 @@ class PlannerAgent:
                 source_url_prefixes=task.source_url_prefixes,
                 dependencies=task.dependencies,
                 assigned_agent=_normalize_research_role(task.assigned_agent),
+                budget=_clamp_task_budget(task.budget, self._default_task_budget),
             )
-            for task in draft.tasks
+            for task in planned_tasks
         ]
         tasks = _ensure_research_execution_contract(tasks, requirement)
         tasks = _ensure_research_verification_path(tasks)
@@ -236,6 +258,7 @@ class PlannerAgent:
                 "source_domains": planned.source_domains,
                 "source_url_prefixes": planned.source_url_prefixes,
                 "assigned_agent": assigned_agent,
+                "budget": _clamp_task_budget(planned.budget, task.budget),
                 "status": task.status,
                 "quality_score": None,
                 "quality_complete": None,
@@ -245,6 +268,58 @@ class PlannerAgent:
             }
         )
         return _ensure_research_execution_contract([revised], requirement)[0]
+
+
+def _clamp_task_budget(proposed: TaskBudget, ceiling: TaskBudget) -> TaskBudget:
+    """Allow tighter model budgets while enforcing every server-side ceiling."""
+
+    return TaskBudget(
+        max_searches=min(proposed.max_searches, ceiling.max_searches),
+        max_sources=min(proposed.max_sources, ceiling.max_sources),
+        max_input_tokens=min(proposed.max_input_tokens, ceiling.max_input_tokens),
+        max_output_tokens=min(proposed.max_output_tokens, ceiling.max_output_tokens),
+        max_seconds=min(proposed.max_seconds, ceiling.max_seconds),
+        max_retries=min(proposed.max_retries, ceiling.max_retries),
+    )
+
+
+def _limit_planned_tasks(
+    tasks: list[PlannedTask],
+    *,
+    max_tasks: int,
+    max_research_workers: int,
+) -> list[PlannedTask]:
+    """Bound model-generated fan-out and repair dependencies after deterministic trimming."""
+
+    research = [
+        task
+        for task in tasks
+        if _normalize_research_role(task.assigned_agent) == AgentName.RESEARCHER
+    ][: max(1, max_research_workers)]
+    verifier = next(
+        (task for task in tasks if task.assigned_agent == AgentName.VERIFIER),
+        None,
+    )
+    writer = next(
+        (task for task in tasks if task.assigned_agent == AgentName.WRITER),
+        None,
+    )
+    if verifier is None or writer is None:
+        raise ValueError("research plan must include verifier and writer tasks")
+    selected = [*research, verifier, writer][:max_tasks]
+    selected_ids = {task.task_id for task in selected}
+    return [
+        task.model_copy(
+            update={
+                "dependencies": tuple(
+                    dependency
+                    for dependency in task.dependencies
+                    if dependency in selected_ids
+                )
+            }
+        )
+        for task in selected
+    ]
 
 
 def _normalize_research_role(agent: AgentName) -> AgentName:
